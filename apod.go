@@ -7,7 +7,23 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
+
+var httpClient = &http.Client{
+	Timeout: 30 * time.Second,
+}
+
+const userAgent = "astrowall/1.0"
+
+func httpGet(url string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	return httpClient.Do(req)
+}
 
 // APODResponse represents the JSON response from NASA's APOD API.
 type APODResponse struct {
@@ -32,7 +48,7 @@ func buildAPODURL(apiKey string, random bool, date string) string {
 }
 
 func fetchAPOD(url string) (APODResponse, error) {
-	resp, err := http.Get(url)
+	resp, err := httpGet(url)
 	if err != nil {
 		return APODResponse{}, fmt.Errorf("request failed: %w", err)
 	}
@@ -61,7 +77,7 @@ func fetchAPOD(url string) (APODResponse, error) {
 }
 
 func downloadImage(url, path string) error {
-	resp, err := http.Get(url)
+	resp, err := httpGet(url)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
