@@ -103,15 +103,15 @@ func main() {
 }
 
 func printDetails(apod *APODResponse, imagePath string) {
-	fmt.Printf("Wallpaper set: %s\n", apod.Title)
-	fmt.Printf("Date: %s\n", apod.Date)
+	fmt.Printf("- Wallpaper set: %s\n", apod.Title)
+	fmt.Printf("- Date: %s\n", apod.Date)
 	if apod.Explanation != "" {
-		fmt.Printf("Explanation: %s\n", apod.Explanation)
+		fmt.Printf("- Explanation: %s\n", apod.Explanation)
 	}
 	if len(apod.Date) >= 10 {
 		page := fmt.Sprintf("https://apod.nasa.gov/apod/ap%s%s%s.html",
 			apod.Date[2:4], apod.Date[5:7], apod.Date[8:10])
-		fmt.Printf("APOD page: %s\n", page)
+		fmt.Printf("- APOD page: %s\n", page)
 	}
-	fmt.Printf("Saved to: %s\n", imagePath)
+	fmt.Printf("- Saved to: %s\n", imagePath)
 }
