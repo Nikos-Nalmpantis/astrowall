@@ -46,6 +46,9 @@ astrowall --sync-only
 
 # Browse the local APOD library in a text TUI
 astrowall --tui
+
+# Set the next wallpaper from your persisted favorites list
+astrowall --cycle-favorites
 ```
 
 ### Flags
@@ -58,6 +61,7 @@ astrowall --tui
 | `--output` | `-o` | `~/Pictures/apod_wallpaper.jpg` | Custom save path |
 | `--date` | `-d` | | Fetch APOD for a specific date (YYYY-MM-DD) |
 | `--tui` | | `false` | Launch the text-based APOD browser |
+| `--cycle-favorites` | | `false` | Set the next favorite wallpaper from the local library |
 | `--sync-only` | | `false` | Sync the local APOD library and preview cache, then exit |
 | `--version` | | | Show version and exit |
 
@@ -93,13 +97,26 @@ By default, metadata is stored under your XDG data directory (usually `~/.local/
 
 Current behavior:
 
-- left pane: the most recent cached APOD titles
+- left column: separate `Recent APODs` and `Favorites` panes
 - right pane: the selected item's date, type, cache status, and description
 - `j` / `k`: move through the list
+- `Tab` / `Shift+Tab`: switch between `Recent APODs` and `Favorites`
 - `q`: quit
+- `f`: favorite or unfavorite the selected item
 - `Enter`: fetch the selected day's image and set it as wallpaper
 
-This first TUI milestone is intentionally text-first. Inline image rendering is not implemented yet, even though preview files are already cached for the next iteration.
+The preview image is rendered in-terminal from the cached preview file using ANSI half-block output, with graceful fallback to text metadata if rendering fails.
+
+## Favorite Cycling
+
+`astrowall --cycle-favorites` cycles through your persisted favorites without launching the TUI.
+
+Current behavior:
+
+- loads the full favorites list from SQLite
+- remembers the last favorite wallpaper it set
+- advances to the next favorite on each run
+- reuses the cached full image when available before downloading again
 
 ## Supported Platforms
 
