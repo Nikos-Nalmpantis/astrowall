@@ -61,6 +61,12 @@ type tuiModel struct {
 	detailStyle lipgloss.Style
 	statusStyle lipgloss.Style
 	helpStyle   lipgloss.Style
+	previewArea imageArea
+}
+
+type imageArea struct {
+	width  int
+	height int
 }
 
 func newTUIModel(records []APODRecord, apiKey string) tuiModel {
@@ -68,7 +74,6 @@ func newTUIModel(records []APODRecord, apiKey string) tuiModel {
 	for _, record := range records {
 		items = append(items, apodListItem{record: record})
 	}
-
 	delegate := list.NewDefaultDelegate()
 	delegate.SetSpacing(0)
 	delegate.ShowDescription = true
@@ -226,6 +231,7 @@ func (m *tuiModel) resize() {
 	m.list.SetSize(leftWidth, contentHeight)
 	m.detail.SetWidth(rightWidth)
 	m.detail.SetHeight(contentHeight)
+	m.previewArea = imageArea{width: max(12, rightWidth-4), height: max(6, contentHeight/2)}
 	m.refreshDetail(false)
 }
 
@@ -247,7 +253,12 @@ func (m *tuiModel) refreshDetail(resetScroll bool) {
 		parts = append(parts, "Favorite: yes")
 	}
 	if record.PreviewPath != "" {
-		parts = append(parts, fmt.Sprintf("Preview cache: %s", record.PreviewPath))
+		if preview, err := renderPreviewBlock(record.PreviewPath, m.previewArea.width, m.previewArea.height); err == nil && preview != "" {
+			parts = append(parts, preview)
+		} else {
+			parts = append(parts, fmt.Sprintf("Preview cache: %s", record.PreviewPath))
+			parts = append(parts, "Preview could not be rendered in this terminal session.")
+		}
 	}
 	parts = append(parts, "")
 	parts = append(parts, strings.TrimSpace(record.Description))
