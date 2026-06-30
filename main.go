@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/muesli/reflow/wordwrap"
 	flag "github.com/spf13/pflag"
 )
 
@@ -103,10 +104,11 @@ func main() {
 }
 
 func printDetails(apod *APODResponse, imagePath string) {
-	fmt.Printf("- Wallpaper set: %s\n", apod.Title)
+	fmt.Printf("- Title: %s\n", apod.Title)
 	fmt.Printf("- Date: %s\n", apod.Date)
 	if apod.Explanation != "" {
-		fmt.Printf("- Explanation: %s\n", apod.Explanation)
+		explanation := fmt.Sprintf("- Explanation: %s", apod.Explanation)
+		fmt.Println(wordwrap.String(explanation, 100))
 	}
 	if len(apod.Date) >= 10 {
 		page := fmt.Sprintf("https://apod.nasa.gov/apod/ap%s%s%s.html",
