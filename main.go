@@ -15,14 +15,15 @@ var version = "dev"
 
 func main() {
 	var (
-		apiKey   string
-		random   bool
-		verbose  bool
-		output   string
-		date     string
-		tuiMode  bool
-		syncOnly bool
-		showVer  bool
+		apiKey         string
+		random         bool
+		verbose        bool
+		output         string
+		date           string
+		tuiMode        bool
+		cycleFavorites bool
+		syncOnly       bool
+		showVer        bool
 	)
 
 	flag.StringVarP(&apiKey, "api-key", "a", "", "NASA API key (or set NASA_API_KEY env var, default: DEMO_KEY)")
@@ -31,6 +32,7 @@ func main() {
 	flag.StringVarP(&output, "output", "o", "", "Save image to this path (default: ~/Pictures/apod_wallpaper.jpg)")
 	flag.StringVarP(&date, "date", "d", "", "Fetch APOD for a specific date (YYYY-MM-DD)")
 	flag.BoolVar(&tuiMode, "tui", false, "Launch the text-based APOD browser")
+	flag.BoolVar(&cycleFavorites, "cycle-favorites", false, "Set the next favorite wallpaper from the local library")
 	flag.BoolVar(&syncOnly, "sync-only", false, "Sync the local APOD library and preview cache, then exit")
 	flag.BoolVar(&showVer, "version", false, "Show version and exit")
 
@@ -61,6 +63,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error: --tui and --sync-only cannot be used together.")
 		os.Exit(1)
 	}
+	if cycleFavorites && (random || date != "" || output != "" || tuiMode || syncOnly) {
+		fmt.Fprintln(os.Stderr, "Error: --cycle-favorites cannot be combined with --random, --date, --output, --tui, or --sync-only.")
+		os.Exit(1)
+	}
 
 	paths, db, err := initializeLibrary()
 	if err != nil {
@@ -76,6 +82,15 @@ func main() {
 	}
 	if syncOnly {
 		printSyncSummary(os.Stdout, result)
+		return
+	}
+	if cycleFavorites {
+		result, err := cycleFavoriteWallpaper(db, paths, key)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error cycling favorite wallpaper: %v\n", err)
+			os.Exit(1)
+		}
+		printFavoriteCycleSummary(os.Stdout, result)
 		return
 	}
 	if tuiMode {
@@ -185,6 +200,11 @@ func printSyncSummary(w io.Writer, result SyncResult) {
 		result.StartDate,
 		result.EndDate,
 	)
+}
+
+func printFavoriteCycleSummary(w io.Writer, result FavoriteCycleResult) {
+	fmt.Fprintf(w, "Set favorite wallpaper to %s (%s).\n", result.Title, result.Date)
+	fmt.Fprintf(w, "- Image: %s\n", result.ImagePath)
 }
 
 func printDetails(apod *APODResponse, imagePath string) {

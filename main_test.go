@@ -103,3 +103,15 @@ func TestPrintSyncSummary(t *testing.T) {
 		}
 	})
 }
+
+func TestPrintFavoriteCycleSummary(t *testing.T) {
+	var buf bytes.Buffer
+	printFavoriteCycleSummary(&buf, FavoriteCycleResult{Title: "My Favorite", Date: "2024-09-27", ImagePath: "/tmp/favorite.jpg"})
+	got := buf.String()
+	if !strings.Contains(got, "Set favorite wallpaper to My Favorite (2024-09-27).") {
+		t.Fatalf("printFavoriteCycleSummary() = %q", got)
+	}
+	if !strings.Contains(got, "/tmp/favorite.jpg") {
+		t.Fatalf("printFavoriteCycleSummary() = %q", got)
+	}
+}

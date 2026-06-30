@@ -63,6 +63,11 @@ CREATE TABLE IF NOT EXISTS apods (
 	fetched_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS app_state (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_apods_fetched_at ON apods(fetched_at DESC);
 CREATE INDEX IF NOT EXISTS idx_apods_favorite ON apods(favorite, date DESC);
 `
@@ -304,6 +309,33 @@ func listFavoriteAPODs(db *sql.DB) ([]APODRecord, error) {
 	}
 
 	return records, nil
+}
+
+func getStateValue(db *sql.DB, key string) (string, error) {
+	var value sql.NullString
+	err := db.QueryRow(`SELECT value FROM app_state WHERE key = ?`, key).Scan(&value)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", fmt.Errorf("querying app state %s: %w", key, err)
+	}
+	if !value.Valid {
+		return "", nil
+	}
+	return value.String, nil
+}
+
+func setStateValue(db *sql.DB, key, value string) error {
+	_, err := db.Exec(`
+		INSERT INTO app_state (key, value)
+		VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, key, value)
+	if err != nil {
+		return fmt.Errorf("saving app state %s: %w", key, err)
+	}
+	return nil
 }
 
 func boolToInt(value bool) int {
