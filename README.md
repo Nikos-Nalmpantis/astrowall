@@ -2,6 +2,8 @@
 
 A CLI tool that fetches [NASA's Astronomy Picture of the Day](https://apod.nasa.gov/) and sets it as your desktop wallpaper.
 
+Astrowall now also keeps a small local library in SQLite plus a preview-image cache, so startup can sync only missing APOD dates instead of re-fetching everything every time.
+
 ## Installation
 
 ### From source
@@ -38,6 +40,12 @@ astrowall --output /path/to/wallpaper.jpg
 
 # Quiet mode (no output)
 astrowall --verbose=false
+
+# Sync the local APOD library and preview cache without setting wallpaper
+astrowall --sync-only
+
+# Browse the local APOD library in a text TUI
+astrowall --tui
 ```
 
 ### Flags
@@ -49,6 +57,8 @@ astrowall --verbose=false
 | `--verbose` | `-v` | `true` | Show image details after setting wallpaper |
 | `--output` | `-o` | `~/Pictures/apod_wallpaper.jpg` | Custom save path |
 | `--date` | `-d` | | Fetch APOD for a specific date (YYYY-MM-DD) |
+| `--tui` | | `false` | Launch the text-based APOD browser |
+| `--sync-only` | | `false` | Sync the local APOD library and preview cache, then exit |
 | `--version` | | | Show version and exit |
 
 ## API Key
@@ -65,6 +75,31 @@ For heavier usage, get a free API key at [api.nasa.gov](https://api.nasa.gov/).
 # Set it once in your shell profile
 export NASA_API_KEY="your-key-here"
 ```
+
+## Local Library Cache
+
+On startup, astrowall now:
+
+1. Opens a local SQLite library database
+2. Checks the latest APOD date already stored
+3. Fetches only the missing dates needed to catch up to today
+4. Caches preview images locally for future TUI browsing
+
+By default, metadata is stored under your XDG data directory (usually `~/.local/share/astrowall/`) and preview/full image cache files are stored under your XDG cache directory (usually `~/.cache/astrowall/`).
+
+## Text TUI Mode
+
+`astrowall --tui` launches the first interactive browser for the local APOD library.
+
+Current behavior:
+
+- left pane: the most recent cached APOD titles
+- right pane: the selected item's date, type, cache status, and description
+- `j` / `k`: move through the list
+- `q`: quit
+- `Enter`: fetch the selected day's image and set it as wallpaper
+
+This first TUI milestone is intentionally text-first. Inline image rendering is not implemented yet, even though preview files are already cached for the next iteration.
 
 ## Supported Platforms
 
