@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -76,5 +77,34 @@ func TestRunTUIModelUsesRecentRecords(t *testing.T) {
 	model = updated.(tuiModel)
 	if got := model.selectedRecord().Title; got != "Stored" {
 		t.Fatalf("selected title = %q, want Stored", got)
+	}
+}
+
+func TestEnsureHDImageCached_ReusesExistingFile(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	paths, err := resolveAppPaths()
+	if err != nil {
+		t.Fatalf("resolveAppPaths() error: %v", err)
+	}
+	db, err := openLibrary(paths.DBPath)
+	if err != nil {
+		t.Fatalf("openLibrary() error: %v", err)
+	}
+	defer db.Close()
+
+	hdPath := filepath.Join(paths.FullDir, "2024-09-27.jpg")
+	if err := os.WriteFile(hdPath, []byte("cached-full"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	record := APODRecord{Date: "2024-09-27", Title: "Cached", HDPath: hdPath}
+	got, err := ensureHDImageCached(db, paths, record, "KEY")
+	if err != nil {
+		t.Fatalf("ensureHDImageCached() error: %v", err)
+	}
+	if got != hdPath {
+		t.Fatalf("ensureHDImageCached() = %q, want %q", got, hdPath)
 	}
 }

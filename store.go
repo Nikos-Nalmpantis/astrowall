@@ -130,6 +130,14 @@ func updatePreviewPath(db *sql.DB, date, previewPath string) error {
 	return nil
 }
 
+func updateHDPath(db *sql.DB, date, hdPath string) error {
+	_, err := db.Exec(`UPDATE apods SET hd_path = ? WHERE date = ?`, hdPath, date)
+	if err != nil {
+		return fmt.Errorf("updating HD path for %s: %w", date, err)
+	}
+	return nil
+}
+
 func apodCount(db *sql.DB) (int, error) {
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM apods`).Scan(&count); err != nil {

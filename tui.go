@@ -3,6 +3,8 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"charm.land/bubbles/v2/list"
@@ -24,9 +26,6 @@ func (i apodListItem) Title() string {
 }
 
 func (i apodListItem) Description() string {
-	if i.record.Favorite {
-		return i.record.Date + " ★"
-	}
 	return i.record.Date
 }
 
@@ -36,6 +35,8 @@ type wallpaperAppliedMsg struct {
 }
 
 type tuiModel struct {
+	db          *sql.DB
+	paths       AppPaths
 	list        list.Model
 	detail      viewport.Model
 	records     []APODRecord
@@ -115,7 +116,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.loading = true
 			m.status = fmt.Sprintf("Setting wallpaper for %s…", record.Title)
-			return m, applyWallpaperCmd(record, m.apiKey)
+			return m, applyWallpaperCmd(m.db, m.paths, record, m.apiKey)
 		}
 
 	case wallpaperAppliedMsg:
@@ -193,9 +194,6 @@ func (m *tuiModel) refreshDetail(resetScroll bool) {
 	parts = append(parts, record.Title)
 	parts = append(parts, fmt.Sprintf("Date: %s", record.Date))
 	parts = append(parts, fmt.Sprintf("Type: %s", record.MediaType))
-	if record.Favorite {
-		parts = append(parts, "Favorite: yes")
-	}
 	if record.PreviewPath != "" {
 		parts = append(parts, fmt.Sprintf("Preview cache: %s", record.PreviewPath))
 	}
@@ -224,44 +222,69 @@ func runTUI(db *sql.DB, apiKey string) error {
 	if err != nil {
 		return err
 	}
+	paths, err := resolveAppPaths()
+	if err != nil {
+		return err
+	}
 
-	program := tea.NewProgram(newTUIModel(records, apiKey))
+	model := newTUIModel(records, apiKey)
+	model.db = db
+	model.paths = paths
+	program := tea.NewProgram(model)
 	_, err = program.Run()
 	return err
 }
 
-func applyWallpaperCmd(record APODRecord, apiKey string) tea.Cmd {
+func applyWallpaperCmd(db *sql.DB, paths AppPaths, record APODRecord, apiKey string) tea.Cmd {
 	return func() tea.Msg {
-		imagePath, err := resolveImagePath("")
+		cachedPath, err := ensureHDImageCached(db, paths, record, apiKey)
 		if err != nil {
 			return wallpaperAppliedMsg{title: record.Title, err: err}
 		}
-
-		apod, err := fetchAPOD(buildAPODURL(apiKey, false, record.Date))
-		if err != nil {
-			return wallpaperAppliedMsg{title: record.Title, err: err}
-		}
-		if apod.MediaType != "image" {
-			return wallpaperAppliedMsg{title: record.Title, err: fmt.Errorf("%s is a %s, not an image", record.Date, apod.MediaType)}
-		}
-
-		imageURL := apod.HDURL
-		if imageURL == "" {
-			imageURL = apod.URL
-		}
-		if imageURL == "" {
-			return wallpaperAppliedMsg{title: record.Title, err: fmt.Errorf("no downloadable image URL for %s", record.Date)}
-		}
-
-		if err := downloadImage(imageURL, imagePath); err != nil {
-			return wallpaperAppliedMsg{title: record.Title, err: err}
-		}
-		if err := setWallpaper(imagePath); err != nil {
+		if err := setWallpaper(cachedPath); err != nil {
 			return wallpaperAppliedMsg{title: record.Title, err: err}
 		}
 
 		return wallpaperAppliedMsg{title: record.Title, err: nil}
 	}
+}
+func ensureHDImageCached(db *sql.DB, paths AppPaths, record APODRecord, apiKey string) (string, error) {
+	if record.HDPath != "" {
+		if _, err := os.Stat(record.HDPath); err == nil {
+			return record.HDPath, nil
+		}
+	}
+
+	apod, err := fetchAPOD(buildAPODURL(apiKey, false, record.Date))
+	if err != nil {
+		return "", err
+	}
+	if apod.MediaType != "image" {
+		return "", fmt.Errorf("%s is a %s, not an image", record.Date, apod.MediaType)
+	}
+
+	imageURL := apod.HDURL
+	if imageURL == "" {
+		imageURL = apod.URL
+	}
+	if imageURL == "" {
+		return "", fmt.Errorf("no downloadable image URL for %s", record.Date)
+	}
+
+	fullPath := filepath.Join(paths.FullDir, record.Date+fileExtensionFromURL(imageURL))
+	if _, err := os.Stat(fullPath); err != nil {
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("checking HD cache for %s: %w", record.Date, err)
+		}
+		if err := downloadImage(imageURL, fullPath); err != nil {
+			return "", err
+		}
+	}
+
+	if err := updateHDPath(db, record.Date, fullPath); err != nil {
+		return "", err
+	}
+	return fullPath, nil
 }
 
 func max(a, b int) int {
