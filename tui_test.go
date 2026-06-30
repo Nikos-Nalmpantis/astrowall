@@ -219,8 +219,38 @@ func TestTUIModelTabSwitchesToFavoritesPane(t *testing.T) {
 	if m.activePane != favoritesPane {
 		t.Fatalf("activePane = %v, want favoritesPane", m.activePane)
 	}
+	if m.favoriteList.Title != "Favorites • active" {
+		t.Fatalf("favoriteList.Title = %q, want Favorites • active", m.favoriteList.Title)
+	}
+	if m.recentList.Title != "Recent APODs" {
+		t.Fatalf("recentList.Title = %q, want Recent APODs", m.recentList.Title)
+	}
 	if got := m.selectedRecord().Title; got != "Favorite" {
 		t.Fatalf("selected title = %q, want Favorite", got)
+	}
+}
+
+func TestTUIModelTabSwitchesPaneByKeyCode(t *testing.T) {
+	recent := []APODRecord{{Date: "2024-09-27", Title: "Recent", Description: "Recent item.", MediaType: "image", URL: "https://example.com/recent.jpg"}}
+	favorites := []APODRecord{{Date: "2024-08-01", Title: "Favorite", Description: "Favorite item.", MediaType: "image", URL: "https://example.com/favorite.jpg", Favorite: true}}
+
+	m := newTUIModel(recent, favorites, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = updated.(tuiModel)
+	if m.activePane != favoritesPane {
+		t.Fatalf("activePane after KeyTab = %v, want favoritesPane", m.activePane)
+	}
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	m = updated.(tuiModel)
+	if m.activePane != recentPane {
+		t.Fatalf("activePane after Shift+Tab = %v, want recentPane", m.activePane)
+	}
+	if m.recentList.Title != "Recent APODs • active" {
+		t.Fatalf("recentList.Title = %q, want Recent APODs • active", m.recentList.Title)
 	}
 }
 

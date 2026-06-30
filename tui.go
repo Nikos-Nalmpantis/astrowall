@@ -41,6 +41,7 @@ type wallpaperAppliedMsg struct {
 
 type favoriteToggledMsg struct {
 	date     string
+	title    string
 	favorite bool
 	err      error
 }
@@ -119,6 +120,7 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 		statusStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("241")),
 		helpStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("244")),
 	}
+	m.updatePaneTitles()
 	m.refreshDetail(false)
 	return m
 }
@@ -137,13 +139,22 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		if isNextPaneKey(msg) {
+			m.activePane = m.nextPane(false)
+			m.updatePaneTitles()
+			m.refreshDetail(true)
+			return m, nil
+		}
+		if isPreviousPaneKey(msg) {
+			m.activePane = m.nextPane(true)
+			m.updatePaneTitles()
+			m.refreshDetail(true)
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
-		case "tab", "shift+tab":
-			m.activePane = m.nextPane(msg.String())
-			m.refreshDetail(true)
-			return m, nil
 		case "f":
 			if m.loading {
 				return m, nil
@@ -193,13 +204,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.favoriteRecords = favorites
 		if m.activePane == favoritesPane && len(m.favoriteRecords) == 0 {
 			m.activePane = recentPane
+			m.updatePaneTitles()
 		}
 		m.syncListItems()
 		m.refreshDetail(false)
 		if msg.favorite {
-			m.status = fmt.Sprintf("Added %s to favorites", m.selectedRecord().Title)
+			m.status = fmt.Sprintf("Added %s to favorites", msg.title)
 		} else {
-			m.status = fmt.Sprintf("Removed %s from favorites", m.selectedRecord().Title)
+			m.status = fmt.Sprintf("Removed %s from favorites", msg.title)
 		}
 		return m, nil
 	}
@@ -236,7 +248,7 @@ func (m tuiModel) View() tea.View {
 		lipgloss.Left,
 		panes,
 		m.statusStyle.Render(m.status),
-		m.helpStyle.Render("List uses built-in vim navigation. Viewport scrolls with j/k when focused by Bubble Tea update flow."),
+		m.helpStyle.Render(fmt.Sprintf("Active pane: %s • Tab/Shift+Tab switch panes • j/k navigate • f favorite • enter set wallpaper • q quit", m.activePaneLabel())),
 	)
 
 	view := tea.NewView(body)
@@ -333,6 +345,7 @@ func runTUI(db *sql.DB, apiKey string) error {
 func (m *tuiModel) syncListItems() {
 	m.syncSingleList(&m.recentList, m.recentRecords)
 	m.syncSingleList(&m.favoriteList, m.favoriteRecords)
+	m.updatePaneTitles()
 }
 
 func applyWallpaperCmd(db *sql.DB, paths AppPaths, record APODRecord, apiKey string) tea.Cmd {
@@ -351,8 +364,12 @@ func applyWallpaperCmd(db *sql.DB, paths AppPaths, record APODRecord, apiKey str
 
 func toggleFavoriteCmd(db *sql.DB, date string) tea.Cmd {
 	return func() tea.Msg {
+		record, err := recordByDate(db, date)
+		if err != nil {
+			return favoriteToggledMsg{date: date, err: err}
+		}
 		favorite, err := toggleFavorite(db, date)
-		return favoriteToggledMsg{date: date, favorite: favorite, err: err}
+		return favoriteToggledMsg{date: date, title: record.Title, favorite: favorite, err: err}
 	}
 }
 func ensureHDImageCached(db *sql.DB, paths AppPaths, record APODRecord, apiKey string) (string, error) {
@@ -431,8 +448,8 @@ func (m *tuiModel) setActiveList(updated list.Model) {
 	m.recentList = updated
 }
 
-func (m tuiModel) nextPane(key string) activePane {
-	if key == "shift+tab" {
+func (m tuiModel) nextPane(reverse bool) activePane {
+	if reverse {
 		if m.activePane == recentPane {
 			if len(m.favoriteRecords) > 0 {
 				return favoritesPane
@@ -451,9 +468,26 @@ func (m tuiModel) nextPane(key string) activePane {
 func (m tuiModel) renderListPane(pane activePane, listModel list.Model) string {
 	style := m.listStyle
 	if m.activePane == pane {
-		style = style.BorderForeground(lipgloss.Color("39"))
+		style = style.BorderForeground(lipgloss.Color("39")).Bold(true)
 	}
 	return style.Render(listModel.View())
+}
+
+func (m *tuiModel) updatePaneTitles() {
+	if m.activePane == recentPane {
+		m.recentList.Title = "Recent APODs • active"
+		m.favoriteList.Title = "Favorites"
+		return
+	}
+	m.recentList.Title = "Recent APODs"
+	m.favoriteList.Title = "Favorites • active"
+}
+
+func (m tuiModel) activePaneLabel() string {
+	if m.activePane == favoritesPane {
+		return "Favorites"
+	}
+	return "Recent APODs"
 }
 
 func (m *tuiModel) updateFavoriteInRecent(date string, favorite bool) {
@@ -482,4 +516,20 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func isNextPaneKey(msg tea.KeyPressMsg) bool {
+	key := msg.Key()
+	if key.Code == tea.KeyTab && key.Mod == 0 {
+		return true
+	}
+	return msg.String() == "tab" || msg.String() == "ctrl+i"
+}
+
+func isPreviousPaneKey(msg tea.KeyPressMsg) bool {
+	key := msg.Key()
+	if key.Code == tea.KeyTab && key.Mod == tea.ModShift {
+		return true
+	}
+	return msg.String() == "shift+tab"
 }
