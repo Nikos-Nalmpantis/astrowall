@@ -253,6 +253,59 @@ func listRecentAPODs(db *sql.DB, limit int) ([]APODRecord, error) {
 	return records, nil
 }
 
+func listFavoriteAPODs(db *sql.DB) ([]APODRecord, error) {
+	rows, err := db.Query(`
+		SELECT date, title, description, media_type, url, hd_url, thumbnail_url, copyright,
+		       preview_path, hd_path, favorite, fetched_at
+		FROM apods
+		WHERE favorite = 1
+		ORDER BY date DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("listing favorite APODs: %w", err)
+	}
+	defer rows.Close()
+
+	var records []APODRecord
+	for rows.Next() {
+		var record APODRecord
+		var fetchedAt string
+		var favorite int
+
+		if err := rows.Scan(
+			&record.Date,
+			&record.Title,
+			&record.Description,
+			&record.MediaType,
+			&record.URL,
+			&record.HDURL,
+			&record.ThumbnailURL,
+			&record.Copyright,
+			&record.PreviewPath,
+			&record.HDPath,
+			&favorite,
+			&fetchedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scanning favorite APODs: %w", err)
+		}
+
+		parsed, err := time.Parse(time.RFC3339, fetchedAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing favorite fetched_at for %s: %w", record.Date, err)
+		}
+
+		record.FetchedAt = parsed
+		record.Favorite = favorite == 1
+		records = append(records, record)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating favorite APODs: %w", err)
+	}
+
+	return records, nil
+}
+
 func boolToInt(value bool) int {
 	if value {
 		return 1

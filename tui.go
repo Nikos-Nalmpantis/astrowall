@@ -45,23 +45,33 @@ type favoriteToggledMsg struct {
 	err      error
 }
 
+type activePane int
+
+const (
+	recentPane activePane = iota
+	favoritesPane
+)
+
 type tuiModel struct {
-	db          *sql.DB
-	paths       AppPaths
-	list        list.Model
-	detail      viewport.Model
-	records     []APODRecord
-	apiKey      string
-	status      string
-	width       int
-	height      int
-	ready       bool
-	loading     bool
-	listStyle   lipgloss.Style
-	detailStyle lipgloss.Style
-	statusStyle lipgloss.Style
-	helpStyle   lipgloss.Style
-	previewArea imageArea
+	db              *sql.DB
+	paths           AppPaths
+	recentList      list.Model
+	favoriteList    list.Model
+	detail          viewport.Model
+	recentRecords   []APODRecord
+	favoriteRecords []APODRecord
+	apiKey          string
+	status          string
+	width           int
+	height          int
+	ready           bool
+	loading         bool
+	activePane      activePane
+	listStyle       lipgloss.Style
+	detailStyle     lipgloss.Style
+	statusStyle     lipgloss.Style
+	helpStyle       lipgloss.Style
+	previewArea     imageArea
 }
 
 type imageArea struct {
@@ -69,7 +79,7 @@ type imageArea struct {
 	height int
 }
 
-func newTUIModel(records []APODRecord, apiKey string) tuiModel {
+func newListModel(title string, records []APODRecord) list.Model {
 	items := make([]list.Item, 0, len(records))
 	for _, record := range records {
 		items = append(items, apodListItem{record: record})
@@ -79,27 +89,35 @@ func newTUIModel(records []APODRecord, apiKey string) tuiModel {
 	delegate.ShowDescription = true
 
 	listModel := list.New(items, delegate, 0, 0)
-	listModel.Title = "Recent APODs"
+	listModel.Title = title
 	listModel.SetShowHelp(false)
 	listModel.SetShowStatusBar(false)
 	listModel.SetShowPagination(false)
 	listModel.SetShowFilter(false)
 	listModel.SetFilteringEnabled(false)
 	listModel.DisableQuitKeybindings()
+	return listModel
+}
 
+func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tuiModel {
+	recentList := newListModel("Recent APODs", recentRecords)
+	favoriteList := newListModel("Favorites", favoriteRecords)
 	detail := viewport.New()
 	detail.SetContent("No APODs loaded.")
 
 	m := tuiModel{
-		list:        listModel,
-		detail:      detail,
-		records:     records,
-		apiKey:      apiKey,
-		status:      "j/k move • enter set wallpaper • f favorite • q quit",
-		listStyle:   lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1),
-		detailStyle: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1),
-		statusStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("241")),
-		helpStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("244")),
+		recentList:      recentList,
+		favoriteList:    favoriteList,
+		detail:          detail,
+		recentRecords:   recentRecords,
+		favoriteRecords: favoriteRecords,
+		apiKey:          apiKey,
+		status:          "j/k move • tab switch pane • enter set wallpaper • f favorite • q quit",
+		activePane:      recentPane,
+		listStyle:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1),
+		detailStyle:     lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1),
+		statusStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("241")),
+		helpStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("244")),
 	}
 	m.refreshDetail(false)
 	return m
@@ -122,6 +140,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "tab", "shift+tab":
+			m.activePane = m.nextPane(msg.String())
+			m.refreshDetail(true)
+			return m, nil
 		case "f":
 			if m.loading {
 				return m, nil
@@ -151,12 +173,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("Wallpaper update failed: %v", msg.err)
 			return m, nil
 		}
-		for i := range m.records {
-			if m.records[i].Date == msg.date {
-				m.records[i].HDPath = msg.path
-				break
-			}
-		}
+		m.updateHDPathInRecords(msg.date, msg.path)
 		m.syncListItems()
 		m.refreshDetail(false)
 		m.status = fmt.Sprintf("Wallpaper set to %s", msg.title)
@@ -167,11 +184,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("Favorite update failed: %v", msg.err)
 			return m, nil
 		}
-		for i := range m.records {
-			if m.records[i].Date == msg.date {
-				m.records[i].Favorite = msg.favorite
-				break
-			}
+		m.updateFavoriteInRecent(msg.date, msg.favorite)
+		favorites, err := listFavoriteAPODs(m.db)
+		if err != nil {
+			m.status = fmt.Sprintf("Favorite refresh failed: %v", err)
+			return m, nil
+		}
+		m.favoriteRecords = favorites
+		if m.activePane == favoritesPane && len(m.favoriteRecords) == 0 {
+			m.activePane = recentPane
 		}
 		m.syncListItems()
 		m.refreshDetail(false)
@@ -183,16 +204,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	before := m.list.Index()
-	var listCmd tea.Cmd
-	m.list, listCmd = m.list.Update(msg)
-	if m.list.Index() != before {
+	before := m.activeList().Index()
+	updatedList, listCmd := m.activeList().Update(msg)
+	m.setActiveList(updatedList)
+	if m.activeList().Index() != before {
 		m.refreshDetail(true)
 	}
 
-	var detailCmd tea.Cmd
-	m.detail, detailCmd = m.detail.Update(msg)
-	return m, tea.Batch(listCmd, detailCmd)
+	return m, listCmd
 }
 
 func (m tuiModel) View() tea.View {
@@ -202,8 +221,14 @@ func (m tuiModel) View() tea.View {
 		return view
 	}
 
+	leftColumn := lipgloss.JoinVertical(
+		lipgloss.Left,
+		m.renderListPane(recentPane, m.recentList),
+		m.renderListPane(favoritesPane, m.favoriteList),
+	)
+
 	panes := lipgloss.JoinHorizontal(lipgloss.Top,
-		m.listStyle.Render(m.list.View()),
+		leftColumn,
 		m.detailStyle.Render(m.detail.View()),
 	)
 
@@ -224,11 +249,14 @@ func (m *tuiModel) resize() {
 		return
 	}
 
-	contentHeight := max(8, m.height-4)
+	contentHeight := max(10, m.height-4)
 	leftWidth := max(30, m.width/3)
 	rightWidth := max(40, m.width-leftWidth-6)
+	recentHeight := max(4, contentHeight/2)
+	favoriteHeight := max(4, contentHeight-recentHeight)
 
-	m.list.SetSize(leftWidth, contentHeight)
+	m.recentList.SetSize(leftWidth, recentHeight)
+	m.favoriteList.SetSize(leftWidth, favoriteHeight)
 	m.detail.SetWidth(rightWidth)
 	m.detail.SetHeight(contentHeight)
 	m.previewArea = imageArea{width: max(12, rightWidth-4), height: max(6, contentHeight/2)}
@@ -238,7 +266,7 @@ func (m *tuiModel) resize() {
 func (m *tuiModel) refreshDetail(resetScroll bool) {
 	record := m.selectedRecord()
 	if record.Date == "" {
-		m.detail.SetContent("No APOD records are available yet. Run astrowall --sync-only first.")
+		m.detail.SetContent("No APOD records are available for the active pane.")
 		if resetScroll {
 			m.detail.GotoTop()
 		}
@@ -269,7 +297,7 @@ func (m *tuiModel) refreshDetail(resetScroll bool) {
 }
 
 func (m tuiModel) selectedRecord() APODRecord {
-	item := m.list.SelectedItem()
+	item := m.activeList().SelectedItem()
 	if item == nil {
 		return APODRecord{}
 	}
@@ -281,7 +309,11 @@ func (m tuiModel) selectedRecord() APODRecord {
 }
 
 func runTUI(db *sql.DB, apiKey string) error {
-	records, err := listRecentAPODs(db, 30)
+	recentRecords, err := listRecentAPODs(db, 30)
+	if err != nil {
+		return err
+	}
+	favoriteRecords, err := listFavoriteAPODs(db)
 	if err != nil {
 		return err
 	}
@@ -290,7 +322,7 @@ func runTUI(db *sql.DB, apiKey string) error {
 		return err
 	}
 
-	model := newTUIModel(records, apiKey)
+	model := newTUIModel(recentRecords, favoriteRecords, apiKey)
 	model.db = db
 	model.paths = paths
 	program := tea.NewProgram(model)
@@ -299,20 +331,8 @@ func runTUI(db *sql.DB, apiKey string) error {
 }
 
 func (m *tuiModel) syncListItems() {
-	items := make([]list.Item, 0, len(m.records))
-	for _, record := range m.records {
-		items = append(items, apodListItem{record: record})
-	}
-	selected := m.list.Index()
-	m.list.SetItems(items)
-	if len(items) == 0 {
-		m.list.Select(0)
-		return
-	}
-	if selected >= len(items) {
-		selected = len(items) - 1
-	}
-	m.list.Select(selected)
+	m.syncSingleList(&m.recentList, m.recentRecords)
+	m.syncSingleList(&m.favoriteList, m.favoriteRecords)
 }
 
 func applyWallpaperCmd(db *sql.DB, paths AppPaths, record APODRecord, apiKey string) tea.Cmd {
@@ -377,6 +397,84 @@ func ensureHDImageCached(db *sql.DB, paths AppPaths, record APODRecord, apiKey s
 		return "", err
 	}
 	return fullPath, nil
+}
+
+func (m *tuiModel) syncSingleList(target *list.Model, records []APODRecord) {
+	items := make([]list.Item, 0, len(records))
+	for _, record := range records {
+		items = append(items, apodListItem{record: record})
+	}
+	selected := target.Index()
+	target.SetItems(items)
+	if len(items) == 0 {
+		target.Select(0)
+		return
+	}
+	if selected >= len(items) {
+		selected = len(items) - 1
+	}
+	target.Select(selected)
+}
+
+func (m tuiModel) activeList() list.Model {
+	if m.activePane == favoritesPane {
+		return m.favoriteList
+	}
+	return m.recentList
+}
+
+func (m *tuiModel) setActiveList(updated list.Model) {
+	if m.activePane == favoritesPane {
+		m.favoriteList = updated
+		return
+	}
+	m.recentList = updated
+}
+
+func (m tuiModel) nextPane(key string) activePane {
+	if key == "shift+tab" {
+		if m.activePane == recentPane {
+			if len(m.favoriteRecords) > 0 {
+				return favoritesPane
+			}
+			return recentPane
+		}
+		return recentPane
+	}
+
+	if m.activePane == recentPane && len(m.favoriteRecords) > 0 {
+		return favoritesPane
+	}
+	return recentPane
+}
+
+func (m tuiModel) renderListPane(pane activePane, listModel list.Model) string {
+	style := m.listStyle
+	if m.activePane == pane {
+		style = style.BorderForeground(lipgloss.Color("39"))
+	}
+	return style.Render(listModel.View())
+}
+
+func (m *tuiModel) updateFavoriteInRecent(date string, favorite bool) {
+	for i := range m.recentRecords {
+		if m.recentRecords[i].Date == date {
+			m.recentRecords[i].Favorite = favorite
+		}
+	}
+}
+
+func (m *tuiModel) updateHDPathInRecords(date, path string) {
+	for i := range m.recentRecords {
+		if m.recentRecords[i].Date == date {
+			m.recentRecords[i].HDPath = path
+		}
+	}
+	for i := range m.favoriteRecords {
+		if m.favoriteRecords[i].Date == date {
+			m.favoriteRecords[i].HDPath = path
+		}
+	}
 }
 
 func max(a, b int) int {
