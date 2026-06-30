@@ -1,8 +1,11 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
+	"io"
 	"os"
+	"time"
 
 	"github.com/muesli/reflow/wordwrap"
 	flag "github.com/spf13/pflag"
@@ -12,12 +15,14 @@ var version = "dev"
 
 func main() {
 	var (
-		apiKey  string
-		random  bool
-		verbose bool
-		output  string
-		date    string
-		showVer bool
+		apiKey   string
+		random   bool
+		verbose  bool
+		output   string
+		date     string
+		tuiMode  bool
+		syncOnly bool
+		showVer  bool
 	)
 
 	flag.StringVarP(&apiKey, "api-key", "a", "", "NASA API key (or set NASA_API_KEY env var, default: DEMO_KEY)")
@@ -25,6 +30,8 @@ func main() {
 	flag.BoolVarP(&verbose, "verbose", "v", true, "Show details about the image")
 	flag.StringVarP(&output, "output", "o", "", "Save image to this path (default: ~/Pictures/apod_wallpaper.jpg)")
 	flag.StringVarP(&date, "date", "d", "", "Fetch APOD for a specific date (YYYY-MM-DD)")
+	flag.BoolVar(&tuiMode, "tui", false, "Launch the text-based APOD browser")
+	flag.BoolVar(&syncOnly, "sync-only", false, "Sync the local APOD library and preview cache, then exit")
 	flag.BoolVar(&showVer, "version", false, "Show version and exit")
 
 	flag.Usage = func() {
@@ -40,18 +47,43 @@ func main() {
 		return
 	}
 
-	// Resolve API key: --api-key > NASA_API_KEY env > DEMO_KEY fallback.
-	key := apiKey
-	if key == "" {
-		key = os.Getenv("NASA_API_KEY")
-	}
-	if key == "" {
-		key = "DEMO_KEY"
-	}
+	key := resolveAPIKey(apiKey)
 
 	if random && date != "" {
 		fmt.Fprintln(os.Stderr, "Error: --random and --date cannot be used together.")
 		os.Exit(1)
+	}
+	if tuiMode && (random || date != "" || output != "") {
+		fmt.Fprintln(os.Stderr, "Error: --tui cannot be combined with --random, --date, or --output.")
+		os.Exit(1)
+	}
+	if tuiMode && syncOnly {
+		fmt.Fprintln(os.Stderr, "Error: --tui and --sync-only cannot be used together.")
+		os.Exit(1)
+	}
+
+	paths, db, err := initializeLibrary()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error initializing local library: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	result, err := runStartupSync(db, paths, key, time.Now(), syncOnly, os.Stderr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error syncing APOD library: %v\n", err)
+		os.Exit(1)
+	}
+	if syncOnly {
+		printSyncSummary(os.Stdout, result)
+		return
+	}
+	if tuiMode {
+		if err := runTUI(db, key); err != nil {
+			fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	imagePath, err := resolveImagePath(output)
@@ -101,6 +133,58 @@ func main() {
 	if verbose {
 		printDetails(&apod, imagePath)
 	}
+}
+
+func resolveAPIKey(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if value := os.Getenv("NASA_API_KEY"); value != "" {
+		return value
+	}
+	return "DEMO_KEY"
+}
+
+func initializeLibrary() (AppPaths, *sql.DB, error) {
+	paths, err := resolveAppPaths()
+	if err != nil {
+		return AppPaths{}, nil, err
+	}
+
+	db, err := openLibrary(paths.DBPath)
+	if err != nil {
+		return AppPaths{}, nil, err
+	}
+
+	return paths, db, nil
+}
+
+func runStartupSync(db *sql.DB, paths AppPaths, apiKey string, now time.Time, syncOnly bool, stderr io.Writer) (SyncResult, error) {
+	result, err := syncAPODArchive(db, paths, apiKey, now)
+	if err != nil {
+		if syncOnly {
+			return SyncResult{}, err
+		}
+		fmt.Fprintf(stderr, "Warning: could not sync local APOD library: %v\n", err)
+		return SyncResult{}, nil
+	}
+	return result, nil
+}
+
+func printSyncSummary(w io.Writer, result SyncResult) {
+	if result.AlreadyUpToDate {
+		fmt.Fprintln(w, "Local APOD library is already up to date.")
+		return
+	}
+
+	fmt.Fprintf(
+		w,
+		"Synced %d APOD items and cached %d previews for %s through %s.\n",
+		result.FetchedCount,
+		result.PreviewedCount,
+		result.StartDate,
+		result.EndDate,
+	)
 }
 
 func printDetails(apod *APODResponse, imagePath string) {
