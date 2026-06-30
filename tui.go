@@ -33,6 +33,8 @@ func (i apodListItem) Description() string {
 }
 
 type wallpaperAppliedMsg struct {
+	date  string
+	path  string
 	title string
 	err   error
 }
@@ -144,6 +146,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("Wallpaper update failed: %v", msg.err)
 			return m, nil
 		}
+		for i := range m.records {
+			if m.records[i].Date == msg.date {
+				m.records[i].HDPath = msg.path
+				break
+			}
+		}
+		m.syncListItems()
+		m.refreshDetail(false)
 		m.status = fmt.Sprintf("Wallpaper set to %s", msg.title)
 		return m, nil
 
@@ -298,13 +308,13 @@ func applyWallpaperCmd(db *sql.DB, paths AppPaths, record APODRecord, apiKey str
 	return func() tea.Msg {
 		cachedPath, err := ensureHDImageCached(db, paths, record, apiKey)
 		if err != nil {
-			return wallpaperAppliedMsg{title: record.Title, err: err}
+			return wallpaperAppliedMsg{date: record.Date, title: record.Title, err: err}
 		}
 		if err := setWallpaper(cachedPath); err != nil {
-			return wallpaperAppliedMsg{title: record.Title, err: err}
+			return wallpaperAppliedMsg{date: record.Date, title: record.Title, path: cachedPath, err: err}
 		}
 
-		return wallpaperAppliedMsg{title: record.Title, err: nil}
+		return wallpaperAppliedMsg{date: record.Date, title: record.Title, path: cachedPath, err: nil}
 	}
 }
 
@@ -315,6 +325,11 @@ func toggleFavoriteCmd(db *sql.DB, date string) tea.Cmd {
 	}
 }
 func ensureHDImageCached(db *sql.DB, paths AppPaths, record APODRecord, apiKey string) (string, error) {
+	storedRecord, err := recordByDate(db, record.Date)
+	if err == nil {
+		record = storedRecord
+	}
+
 	if record.HDPath != "" {
 		if _, err := os.Stat(record.HDPath); err == nil {
 			return record.HDPath, nil

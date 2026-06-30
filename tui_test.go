@@ -109,6 +109,53 @@ func TestEnsureHDImageCached_ReusesExistingFile(t *testing.T) {
 	}
 }
 
+func TestEnsureHDImageCached_UsesStoredHDPathFromDatabase(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	paths, err := resolveAppPaths()
+	if err != nil {
+		t.Fatalf("resolveAppPaths() error: %v", err)
+	}
+	db, err := openLibrary(paths.DBPath)
+	if err != nil {
+		t.Fatalf("openLibrary() error: %v", err)
+	}
+	defer db.Close()
+
+	hdPath := filepath.Join(paths.FullDir, "2024-09-27.jpg")
+	if err := os.WriteFile(hdPath, []byte("cached-full"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	if err := upsertAPOD(db, APODRecord{
+		Date:        "2024-09-27",
+		Title:       "Stored",
+		Description: "Stored item.",
+		MediaType:   "image",
+		URL:         "https://example.com/stored.jpg",
+		HDPath:      hdPath,
+		FetchedAt:   time.Date(2024, 9, 27, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("upsertAPOD() error: %v", err)
+	}
+
+	originalBaseURL := apodAPIBaseURL
+	apodAPIBaseURL = "http://127.0.0.1:1/planetary/apod"
+	defer func() {
+		apodAPIBaseURL = originalBaseURL
+	}()
+
+	staleRecord := APODRecord{Date: "2024-09-27", Title: "Stored"}
+	got, err := ensureHDImageCached(db, paths, staleRecord, "KEY")
+	if err != nil {
+		t.Fatalf("ensureHDImageCached() error: %v", err)
+	}
+	if got != hdPath {
+		t.Fatalf("ensureHDImageCached() = %q, want %q", got, hdPath)
+	}
+}
+
 func TestToggleFavoriteCmdUpdatesState(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
