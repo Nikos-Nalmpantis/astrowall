@@ -108,3 +108,51 @@ func TestEnsureHDImageCached_ReusesExistingFile(t *testing.T) {
 		t.Fatalf("ensureHDImageCached() = %q, want %q", got, hdPath)
 	}
 }
+
+func TestToggleFavoriteCmdUpdatesState(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	paths, err := resolveAppPaths()
+	if err != nil {
+		t.Fatalf("resolveAppPaths() error: %v", err)
+	}
+	db, err := openLibrary(paths.DBPath)
+	if err != nil {
+		t.Fatalf("openLibrary() error: %v", err)
+	}
+	defer db.Close()
+
+	if err := upsertAPOD(db, APODRecord{
+		Date:        "2024-09-27",
+		Title:       "Favorite me",
+		Description: "Stored item.",
+		MediaType:   "image",
+		URL:         "https://example.com/stored.jpg",
+		FetchedAt:   time.Date(2024, 9, 27, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("upsertAPOD() error: %v", err)
+	}
+
+	records, err := listRecentAPODs(db, 30)
+	if err != nil {
+		t.Fatalf("listRecentAPODs() error: %v", err)
+	}
+	model := newTUIModel(records, "KEY")
+	model.db = db
+	model.paths = paths
+
+	msg := toggleFavoriteCmd(db, "2024-09-27")().(favoriteToggledMsg)
+	if msg.err != nil {
+		t.Fatalf("toggleFavoriteCmd() error: %v", msg.err)
+	}
+	if !msg.favorite {
+		t.Fatal("msg.favorite = false, want true")
+	}
+
+	updatedModel, _ := model.Update(msg)
+	model = updatedModel.(tuiModel)
+	if !model.selectedRecord().Favorite {
+		t.Fatal("selectedRecord().Favorite = false, want true")
+	}
+}

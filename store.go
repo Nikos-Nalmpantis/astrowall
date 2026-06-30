@@ -138,6 +138,19 @@ func updateHDPath(db *sql.DB, date, hdPath string) error {
 	return nil
 }
 
+func toggleFavorite(db *sql.DB, date string) (bool, error) {
+	_, err := db.Exec(`UPDATE apods SET favorite = CASE favorite WHEN 0 THEN 1 ELSE 0 END WHERE date = ?`, date)
+	if err != nil {
+		return false, fmt.Errorf("toggling favorite for %s: %w", date, err)
+	}
+
+	var favorite int
+	if err := db.QueryRow(`SELECT favorite FROM apods WHERE date = ?`, date).Scan(&favorite); err != nil {
+		return false, fmt.Errorf("querying favorite state for %s: %w", date, err)
+	}
+	return favorite == 1, nil
+}
+
 func apodCount(db *sql.DB) (int, error) {
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM apods`).Scan(&count); err != nil {

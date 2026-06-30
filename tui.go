@@ -26,12 +26,21 @@ func (i apodListItem) Title() string {
 }
 
 func (i apodListItem) Description() string {
+	if i.record.Favorite {
+		return i.record.Date + " ★"
+	}
 	return i.record.Date
 }
 
 type wallpaperAppliedMsg struct {
 	title string
 	err   error
+}
+
+type favoriteToggledMsg struct {
+	date     string
+	favorite bool
+	err      error
 }
 
 type tuiModel struct {
@@ -79,7 +88,7 @@ func newTUIModel(records []APODRecord, apiKey string) tuiModel {
 		detail:      detail,
 		records:     records,
 		apiKey:      apiKey,
-		status:      "j/k move • enter set wallpaper • q quit",
+		status:      "j/k move • enter set wallpaper • f favorite • q quit",
 		listStyle:   lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1),
 		detailStyle: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1),
 		statusStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("241")),
@@ -106,6 +115,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "f":
+			if m.loading {
+				return m, nil
+			}
+			record := m.selectedRecord()
+			if record.Date == "" {
+				return m, nil
+			}
+			m.status = fmt.Sprintf("Toggling favorite for %s…", record.Title)
+			return m, toggleFavoriteCmd(m.db, record.Date)
 		case "enter":
 			if m.loading {
 				return m, nil
@@ -126,6 +145,26 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = fmt.Sprintf("Wallpaper set to %s", msg.title)
+		return m, nil
+
+	case favoriteToggledMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("Favorite update failed: %v", msg.err)
+			return m, nil
+		}
+		for i := range m.records {
+			if m.records[i].Date == msg.date {
+				m.records[i].Favorite = msg.favorite
+				break
+			}
+		}
+		m.syncListItems()
+		m.refreshDetail(false)
+		if msg.favorite {
+			m.status = fmt.Sprintf("Added %s to favorites", m.selectedRecord().Title)
+		} else {
+			m.status = fmt.Sprintf("Removed %s from favorites", m.selectedRecord().Title)
+		}
 		return m, nil
 	}
 
@@ -194,6 +233,9 @@ func (m *tuiModel) refreshDetail(resetScroll bool) {
 	parts = append(parts, record.Title)
 	parts = append(parts, fmt.Sprintf("Date: %s", record.Date))
 	parts = append(parts, fmt.Sprintf("Type: %s", record.MediaType))
+	if record.Favorite {
+		parts = append(parts, "Favorite: yes")
+	}
 	if record.PreviewPath != "" {
 		parts = append(parts, fmt.Sprintf("Preview cache: %s", record.PreviewPath))
 	}
@@ -235,6 +277,23 @@ func runTUI(db *sql.DB, apiKey string) error {
 	return err
 }
 
+func (m *tuiModel) syncListItems() {
+	items := make([]list.Item, 0, len(m.records))
+	for _, record := range m.records {
+		items = append(items, apodListItem{record: record})
+	}
+	selected := m.list.Index()
+	m.list.SetItems(items)
+	if len(items) == 0 {
+		m.list.Select(0)
+		return
+	}
+	if selected >= len(items) {
+		selected = len(items) - 1
+	}
+	m.list.Select(selected)
+}
+
 func applyWallpaperCmd(db *sql.DB, paths AppPaths, record APODRecord, apiKey string) tea.Cmd {
 	return func() tea.Msg {
 		cachedPath, err := ensureHDImageCached(db, paths, record, apiKey)
@@ -246,6 +305,13 @@ func applyWallpaperCmd(db *sql.DB, paths AppPaths, record APODRecord, apiKey str
 		}
 
 		return wallpaperAppliedMsg{title: record.Title, err: nil}
+	}
+}
+
+func toggleFavoriteCmd(db *sql.DB, date string) tea.Cmd {
+	return func() tea.Msg {
+		favorite, err := toggleFavorite(db, date)
+		return favoriteToggledMsg{date: date, favorite: favorite, err: err}
 	}
 }
 func ensureHDImageCached(db *sql.DB, paths AppPaths, record APODRecord, apiKey string) (string, error) {
