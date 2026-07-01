@@ -511,13 +511,6 @@ func (m *tuiModel) updateHDPathInRecords(date, path string) {
 	}
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 func isNextPaneKey(msg tea.KeyPressMsg) bool {
 	key := msg.Key()
 	if key.Code == tea.KeyTab && key.Mod == 0 {
