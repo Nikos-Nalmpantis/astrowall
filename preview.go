@@ -38,9 +38,9 @@ func imageToANSIHalfBlocks(img image.Image, width, height int) string {
 	}
 
 	var lines []string
-	for y := 0; y < height; y++ {
+	for y := range height {
 		var row strings.Builder
-		for x := 0; x < width; x++ {
+		for x := range width {
 			topY := y * 2
 			bottomY := topY + 1
 			top := samplePixel(img, x, topY, width, height*2)
