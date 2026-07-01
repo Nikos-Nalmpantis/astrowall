@@ -11,6 +11,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/muesli/reflow/wordwrap"
 )
 
 type apodListItem struct {
@@ -302,7 +303,11 @@ func (m *tuiModel) refreshDetail(resetScroll bool) {
 	}
 	parts = append(parts, "")
 	parts = append(parts, strings.TrimSpace(record.Description))
-	m.detail.SetContent(strings.Join(parts, "\n"))
+
+	fullContent := strings.Join(parts, "\n")
+	wrappedContent := wordwrap.String(fullContent, m.detail.Width())
+
+	m.detail.SetContent(wrappedContent)
 	if resetScroll {
 		m.detail.GotoTop()
 	}
