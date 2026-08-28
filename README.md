@@ -47,6 +47,9 @@ astrowall --sync-only
 # Browse the local APOD library in a text TUI
 astrowall --tui
 
+# Force Kitty graphics in a compatible terminal or configured tmux session
+astrowall --tui --image-protocol kitty
+
 # Set the next wallpaper from your persisted favorites list
 astrowall --cycle-favorites
 ```
@@ -61,6 +64,7 @@ astrowall --cycle-favorites
 | `--output` | `-o` | `~/Pictures/apod_wallpaper.jpg` | Custom save path |
 | `--date` | `-d` | | Fetch APOD for a specific date (YYYY-MM-DD) |
 | `--tui` | | `false` | Launch the text-based APOD browser |
+| `--image-protocol` | | `auto` | TUI image renderer: `auto`, `kitty`, `wezterm`, or `ansi` |
 | `--cycle-favorites` | | `false` | Set the next favorite wallpaper from the local library |
 | `--sync-only` | | `false` | Sync the local APOD library and preview cache, then exit |
 | `--version` | | | Show version and exit |
@@ -104,8 +108,17 @@ Current behavior:
 - `q`: quit
 - `f`: favorite or unfavorite the selected item
 - `Enter`: fetch the selected day's image and set it as wallpaper
+- `d`: toggle between the selected APOD image and description
 
-The preview image is rendered in-terminal from the cached preview file using ANSI half-block output, with graceful fallback to text metadata if rendering fails.
+In `auto` mode, direct WezTerm sessions use WezTerm's standard Kitty image placement support, while compatible Kitty and Ghostty sessions use Kitty Unicode placeholders. Other terminals use ANSI half-block output. Auto mode remains conservative inside tmux; force Kitty graphics with `--image-protocol kitty` after confirming support and enabling passthrough:
+
+```tmux
+set -g allow-passthrough on
+```
+
+Use `--image-protocol ansi` to always use the portable half-block renderer.
+
+The WezTerm backend is intended for direct sessions and falls back to ANSI inside tmux.
 
 ## Favorite Cycling
 

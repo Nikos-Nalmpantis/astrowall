@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,6 +70,17 @@ type archiveItemSyncedMsg struct {
 	err       error
 }
 
+type nativeImagePreparedMsg struct {
+	image nativeImage
+	key   string
+	err   error
+}
+
+type nativeImageActivatedMsg struct {
+	image nativeImage
+	key   string
+}
+
 type activePane int
 
 const (
@@ -77,37 +89,48 @@ const (
 )
 
 type tuiModel struct {
-	db              *sql.DB
-	paths           AppPaths
-	recentList      list.Model
-	favoriteList    list.Model
-	detail          viewport.Model
-	recentRecords   []APODRecord
-	favoriteRecords []APODRecord
-	apiKey          string
-	status          string
-	width           int
-	height          int
-	ready           bool
-	loading         bool
-	showHelp        bool
-	showDescription bool
-	syncing         bool
-	syncItems       []APODResponse
-	syncTotal       int
-	syncCompleted   int
-	syncPreviewed   int
-	syncNow         time.Time
-	syncContext     context.Context
-	cancelSync      context.CancelFunc
-	commands        *commandTracker
-	activePane      activePane
-	spinner         spinner.Model
-	listStyle       lipgloss.Style
-	detailStyle     lipgloss.Style
-	statusStyle     lipgloss.Style
-	helpStyle       lipgloss.Style
-	previewArea     imageArea
+	db               *sql.DB
+	paths            AppPaths
+	recentList       list.Model
+	favoriteList     list.Model
+	detail           viewport.Model
+	recentRecords    []APODRecord
+	favoriteRecords  []APODRecord
+	apiKey           string
+	status           string
+	width            int
+	height           int
+	ready            bool
+	loading          bool
+	showHelp         bool
+	showDescription  bool
+	imageProtocol    imageProtocol
+	nativeImage      nativeImage
+	nativeRequest    string
+	nativeTarget     string
+	nativeGeneration uint64
+	nativePending    map[uint32]struct{}
+	nativeKnown      map[uint32]struct{}
+	nativeContext    context.Context
+	cancelNative     context.CancelFunc
+	tmux             bool
+	syncing          bool
+	syncItems        []APODResponse
+	syncTotal        int
+	syncCompleted    int
+	syncPreviewed    int
+	syncNow          time.Time
+	syncContext      context.Context
+	cancelSync       context.CancelFunc
+	commands         *commandTracker
+	nativeOutput     *nativeImageOutput
+	activePane       activePane
+	spinner          spinner.Model
+	listStyle        lipgloss.Style
+	detailStyle      lipgloss.Style
+	statusStyle      lipgloss.Style
+	helpStyle        lipgloss.Style
+	previewArea      imageArea
 }
 
 type imageArea struct {
@@ -146,7 +169,6 @@ const (
 	verticalInterPaneGap   = 0
 	horizontalOuterInset   = 2
 	horizontalInterPaneGap = 1
-	detailHeaderLineCount  = 4
 )
 
 var selectedAccent = lipgloss.Color("#EE6FF8")
@@ -191,6 +213,7 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 		status:          "j/k move • tab switch pane • d description • enter set wallpaper • f favorite • o page • u media • ? help • q quit",
 		activePane:      recentPane,
 		spinner:         spin,
+		nativeOutput:    newNativeImageOutput(io.Discard),
 		listStyle:       lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(0, 1),
 		detailStyle:     lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(0, 1),
 		statusStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("241")),
@@ -215,7 +238,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.ready = true
 		m.resize()
-		return m, nil
+		return m, m.requestNativeImage()
 
 	case spinner.TickMsg:
 		if !m.loading && !m.syncing {
@@ -228,16 +251,19 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		if isHelpToggleKey(msg) {
 			m.showHelp = !m.showHelp
-			return m, nil
+			if m.showHelp {
+				return m, m.clearNativeImage()
+			}
+			return m, m.requestNativeImage()
 		}
 		if m.showHelp {
 			switch {
 			case isHelpCloseKey(msg):
 				m.showHelp = false
-				return m, nil
+				return m, m.requestNativeImage()
 			case msg.String() == "q", msg.String() == "ctrl+c":
 				m.cancelBackgroundSync()
-				return m, tea.Quit
+				return m, tea.Sequence(m.clearNativeImage(), tea.Quit)
 			default:
 				return m, nil
 			}
@@ -247,13 +273,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activePane = m.nextPane(false)
 			m.updatePaneTitles()
 			m.refreshDetail(true)
-			return m, nil
+			return m, m.requestNativeImage()
 		}
 		if isPreviousPaneKey(msg) {
 			m.activePane = m.nextPane(true)
 			m.updatePaneTitles()
 			m.refreshDetail(true)
-			return m, nil
+			return m, m.requestNativeImage()
 		}
 		if m.descriptionVisible() && isDetailScrollKey(msg) {
 			var cmd tea.Cmd
@@ -264,21 +290,22 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			m.cancelBackgroundSync()
-			return m, tea.Quit
+			return m, tea.Sequence(m.clearNativeImage(), tea.Quit)
 		case "d":
 			if m.selectedRecord().PreviewPath == "" {
 				m.refreshDetail(true)
 				m.status = "No preview available • showing APOD description"
-				return m, nil
+				return m, m.clearNativeImage()
 			}
 			m.showDescription = !m.showDescription
 			m.refreshDetail(true)
 			if m.showDescription {
 				m.status = "Showing APOD description • PgUp/PgDown or Ctrl+U/Ctrl+D scroll • d image"
+				return m, m.clearNativeImage()
 			} else {
 				m.status = "Showing APOD image • d description"
+				return m, m.requestNativeImage()
 			}
-			return m, nil
 		case "f":
 			if m.loading {
 				return m, nil
@@ -372,7 +399,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncing = false
 			m.syncItems = nil
 			m.status = fmt.Sprintf("Library sync failed for %s: %v", msg.date, msg.err)
-			return m, nil
+			return m, m.requestNativeImage()
 		}
 		m.syncCompleted++
 		if msg.previewed {
@@ -388,10 +415,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.syncItems) == 0 {
 			m.syncing = false
 			m.status = fmt.Sprintf("Synced %d APODs and cached %d previews", m.syncCompleted, m.syncPreviewed)
-			return m, nil
+			return m, m.requestNativeImage()
 		}
 		m.status = fmt.Sprintf("Syncing APOD %d/%d…", m.syncCompleted+1, m.syncTotal)
-		return m, m.syncArchiveItemCmd(m.syncItems[0])
+		return m, tea.Batch(m.syncArchiveItemCmd(m.syncItems[0]), m.requestNativeImage())
 
 	case favoriteToggledMsg:
 		if msg.err != nil {
@@ -425,7 +452,45 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = fmt.Sprintf("Removed %s from favorites", msg.title)
 		}
+		return m, m.requestNativeImage()
+
+	case nativeImagePreparedMsg:
+		if msg.key != m.nativeRequest || msg.err != nil || !m.nativeImageWanted() {
+			if msg.err != nil && msg.key == m.nativeRequest {
+				m.nativeRequest = ""
+				m.nativeTarget = ""
+				m.status = fmt.Sprintf("Native preview unavailable; using ANSI: %v", msg.err)
+			}
+			return m, nil
+		}
+		if m.nativePending == nil {
+			m.nativePending = make(map[uint32]struct{})
+		}
+		if msg.image.id != 0 {
+			m.nativePending[msg.image.id] = struct{}{}
+			m.nativeKnown[msg.image.id] = struct{}{}
+		}
+		if msg.image.protocol == imageProtocolWezTerm {
+			m.nativeImage = msg.image
+			m.refreshDetail(false)
+			m.nativeOutput.setPlacement(msg.image.placement)
+			delete(m.nativePending, msg.image.id)
+			return m, tea.Raw(msg.image.transmission)
+		}
+		return m, tea.Sequence(
+			tea.Raw(msg.image.transmission),
+			func() tea.Msg { return nativeImageActivatedMsg{image: msg.image, key: msg.key} },
+		)
+
+	case nativeImageActivatedMsg:
+		delete(m.nativePending, msg.image.id)
+		if msg.key != m.nativeRequest || !m.nativeImageWanted() {
+			return m, tea.Raw(kittyDeleteImage(msg.image.id, m.tmux))
+		}
+		m.nativeImage = msg.image
+		m.refreshDetail(false)
 		return m, nil
+
 	}
 
 	before := m.activeList().Index()
@@ -433,6 +498,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.setActiveList(updatedList)
 	if m.activeList().Index() != before {
 		m.refreshDetail(true)
+		return m, tea.Batch(listCmd, m.requestNativeImage())
 	}
 
 	return m, listCmd
@@ -487,7 +553,6 @@ func (m tuiModel) View() tea.View {
 		textInset+m.helpStyle.Render(helpLine),
 		layoutSpacer(verticalOuterInset),
 	)
-
 	view := tea.NewView(body)
 	view.AltScreen = true
 	return view
@@ -530,8 +595,7 @@ func (m *tuiModel) resize() {
 	m.detail.SetWidth(detailInnerWidth)
 	m.detail.SetHeight(detailInnerHeight)
 
-	previewHeight := max(6, detailInnerHeight-detailHeaderLineCount)
-	m.previewArea = imageArea{width: max(12, detailInnerWidth), height: previewHeight}
+	m.previewArea = imageArea{width: detailInnerWidth}
 	m.refreshDetail(false)
 }
 
@@ -544,16 +608,13 @@ func (m *tuiModel) refreshDetail(resetScroll bool) {
 		}
 		return
 	}
+	m.previewArea.height = max(0, m.detail.Height()-m.detailHeaderHeight(record))
 
-	var parts []string
-	parts = append(parts, record.Title)
-	parts = append(parts, fmt.Sprintf("Date: %s", record.Date))
-	parts = append(parts, fmt.Sprintf("Type: %s", record.MediaType))
-	if record.Favorite {
-		parts = append(parts, "Favorite: yes")
-	}
+	parts := m.detailHeader(record)
 	if m.descriptionVisible() {
 		parts = append(parts, "", "Description", "", strings.TrimSpace(record.Description))
+	} else if record.PreviewPath != "" && m.nativeImageMatches(record.PreviewPath) {
+		parts = append(parts, m.nativeImage.placeholders)
 	} else if record.PreviewPath != "" {
 		if preview, err := renderPreviewBlock(record.PreviewPath, m.previewArea.width, m.previewArea.height); err == nil && preview != "" {
 			parts = append(parts, preview)
@@ -596,19 +657,33 @@ func (m tuiModel) selectedRecord() APODRecord {
 	return selected.record
 }
 
-func runTUI(db *sql.DB, paths AppPaths, apiKey string) error {
-	model, err := newTUIModelFromLibrary(db, paths, apiKey, time.Now())
+func runTUI(db *sql.DB, paths AppPaths, apiKey string, protocol imageProtocol) error {
+	output := newNativeImageOutput(os.Stdout)
+	model, err := newTUIModelFromLibrary(db, paths, apiKey, protocol, time.Now())
 	if err != nil {
 		return err
 	}
-	program := tea.NewProgram(model)
-	_, err = program.Run()
+	model.nativeOutput = output
+	program := tea.NewProgram(model, tea.WithOutput(output))
+	finalModel, err := program.Run()
 	model.cancelBackgroundSync()
+	final, hasFinalModel := finalModel.(tuiModel)
+	if hasFinalModel {
+		final.cancelNativeImage()
+	} else {
+		model.cancelNativeImage()
+	}
 	model.commands.closeAndWait()
+	if hasFinalModel && final.allNativeDeleteSequence() != "" {
+		_, cleanupErr := os.Stdout.WriteString(final.allNativeDeleteSequence())
+		if err == nil {
+			err = cleanupErr
+		}
+	}
 	return err
 }
 
-func newTUIModelFromLibrary(db *sql.DB, paths AppPaths, apiKey string, now time.Time) (tuiModel, error) {
+func newTUIModelFromLibrary(db *sql.DB, paths AppPaths, apiKey string, protocol imageProtocol, now time.Time) (tuiModel, error) {
 	recentRecords, err := listRecentAPODs(db, 30)
 	if err != nil {
 		return tuiModel{}, err
@@ -618,14 +693,143 @@ func newTUIModelFromLibrary(db *sql.DB, paths AppPaths, apiKey string, now time.
 		return tuiModel{}, err
 	}
 	model := newTUIModel(recentRecords, favoriteRecords, apiKey)
+	model.imageProtocol = resolveImageProtocol(protocol, os.Getenv)
+	model.tmux = os.Getenv("TMUX") != ""
 	model.db = db
 	model.paths = paths
 	model.syncing = true
 	model.syncNow = now
 	model.syncContext, model.cancelSync = context.WithCancel(context.Background())
+	model.nativeContext, model.cancelNative = context.WithCancel(context.Background())
+	model.nativePending = make(map[uint32]struct{})
+	model.nativeKnown = make(map[uint32]struct{})
+	model.nativeOutput = newNativeImageOutput(io.Discard)
 	model.commands = &commandTracker{}
 	model.status = "Checking for new APODs…"
 	return model, nil
+}
+
+func (m tuiModel) nativeImageWanted() bool {
+	record := m.selectedRecord()
+	return (m.imageProtocol == imageProtocolKitty || m.imageProtocol == imageProtocolWezTerm) && !m.showDescription && !m.showHelp && record.PreviewPath != "" && m.previewArea.width > 0 && m.previewArea.height > 0
+}
+
+func (m tuiModel) nativeImageKey() string {
+	if !m.nativeImageWanted() {
+		return ""
+	}
+	record := m.selectedRecord()
+	x, y := m.nativeImagePosition()
+	return fmt.Sprintf("%s:%s:%dx%d@%d,%d", m.imageProtocol, record.PreviewPath, m.previewArea.width, m.previewArea.height, x, y)
+}
+
+func (m tuiModel) nativeImageMatches(path string) bool {
+	return m.nativeImage.protocol == m.imageProtocol && m.nativeImage.path == path && m.nativeImage.width == m.previewArea.width && m.nativeImage.height == m.previewArea.height
+}
+
+func (m tuiModel) nativeImagePosition() (int, int) {
+	listHorizontalFrame, _ := m.listStyle.GetFrameSize()
+	leftOuterWidth := m.recentList.Width() + listHorizontalFrame + 1
+	detailX := horizontalOuterInset + leftOuterWidth + horizontalInterPaneGap
+	x := detailX + m.detailStyle.GetBorderLeftSize() + m.detailStyle.GetPaddingLeft()
+	headerLines := m.detailHeaderHeight(m.selectedRecord())
+	y := verticalOuterInset + m.detailStyle.GetBorderTopSize() + m.detailStyle.GetPaddingTop() + headerLines
+	return x, y
+}
+
+func (m tuiModel) detailHeaderHeight(record APODRecord) int {
+	return strings.Count(wordwrap.String(strings.Join(m.detailHeader(record), "\n"), max(20, m.detail.Width())), "\n") + 1
+}
+
+func (m tuiModel) detailHeader(record APODRecord) []string {
+	parts := []string{
+		record.Title,
+		fmt.Sprintf("Date: %s", record.Date),
+		fmt.Sprintf("Type: %s", record.MediaType),
+	}
+	if record.Favorite {
+		parts = append(parts, "Favorite: yes")
+	}
+	return parts
+}
+
+func (m *tuiModel) requestNativeImage() tea.Cmd {
+	key := m.nativeImageKey()
+	if key == "" {
+		return m.clearNativeImage()
+	}
+	if key == m.nativeTarget {
+		return nil
+	}
+	cleanup := m.clearNativeImage()
+	if m.cancelNative != nil {
+		m.cancelNative()
+	}
+	m.nativeContext, m.cancelNative = context.WithCancel(context.Background())
+	m.nativeGeneration++
+	m.nativeTarget = key
+	m.nativeRequest = fmt.Sprintf("%d:%s", m.nativeGeneration, key)
+	request := m.nativeRequest
+	path := m.selectedRecord().PreviewPath
+	width := m.previewArea.width
+	height := m.previewArea.height
+	tmux := m.tmux
+	protocol := m.imageProtocol
+	x, y := m.nativeImagePosition()
+	ctx := m.nativeContext
+	prepare := m.trackCmd(func() tea.Msg {
+		image, err := prepareNativeImage(ctx, protocol, path, width, height, x, y, tmux)
+		return nativeImagePreparedMsg{image: image, key: request, err: err}
+	})
+	return tea.Sequence(cleanup, prepare)
+}
+
+func (m *tuiModel) clearNativeImage() tea.Cmd {
+	m.nativeRequest = ""
+	m.nativeTarget = ""
+	if m.cancelNative != nil {
+		m.cancelNative()
+	}
+	if m.nativeOutput != nil {
+		m.nativeOutput.setPlacement("")
+	}
+	sequence := m.currentNativeDeleteSequence()
+	if sequence == "" {
+		return nil
+	}
+	m.nativeImage = nativeImage{}
+	m.nativePending = make(map[uint32]struct{})
+	m.refreshDetail(false)
+	return tea.Raw(sequence)
+}
+
+func (m tuiModel) currentNativeDeleteSequence() string {
+	var sequence strings.Builder
+	ids := make(map[uint32]struct{}, len(m.nativePending)+1)
+	if m.nativeImage.id != 0 {
+		ids[m.nativeImage.id] = struct{}{}
+	}
+	for id := range m.nativePending {
+		ids[id] = struct{}{}
+	}
+	for id := range ids {
+		sequence.WriteString(kittyDeleteImage(id, m.tmux))
+	}
+	return sequence.String()
+}
+
+func (m tuiModel) allNativeDeleteSequence() string {
+	var sequence strings.Builder
+	for id := range m.nativeKnown {
+		sequence.WriteString(kittyDeleteImage(id, m.tmux))
+	}
+	return sequence.String()
+}
+
+func (m tuiModel) cancelNativeImage() {
+	if m.cancelNative != nil {
+		m.cancelNative()
+	}
 }
 
 func (m tuiModel) prepareArchiveSyncCmd() tea.Cmd {

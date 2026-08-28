@@ -127,6 +127,227 @@ func TestTUIModelScrollsDescriptionWithoutChangingSelection(t *testing.T) {
 	}
 }
 
+func TestTUIModelActivatesAndClearsNativePreview(t *testing.T) {
+	record := APODRecord{Date: "2024-09-27", Title: "Native", PreviewPath: "/preview.jpg"}
+	m := newTUIModel([]APODRecord{record}, nil, "KEY")
+	m.imageProtocol = imageProtocolKitty
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	key := m.nativeRequest
+	if key == "" {
+		t.Fatal("native request key is empty")
+	}
+
+	m.nativeKnown = make(map[uint32]struct{})
+	native := nativeImage{id: 42, path: record.PreviewPath, width: m.previewArea.width, height: m.previewArea.height, protocol: imageProtocolKitty, placeholders: "native placeholders"}
+	updated, _ = m.Update(nativeImageActivatedMsg{image: native, key: key})
+	m = updated.(tuiModel)
+	if !strings.Contains(m.detail.View(), native.placeholders) {
+		t.Fatalf("detail = %q, want native placeholders", m.detail.View())
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "d", Code: 'd'})
+	m = updated.(tuiModel)
+	if m.nativeImage.id != 0 {
+		t.Fatalf("native image ID = %d after description toggle", m.nativeImage.id)
+	}
+	if cmd == nil {
+		t.Fatal("description toggle did not return native cleanup command")
+	}
+	msg, ok := cmd().(tea.RawMsg)
+	if !ok || !strings.Contains(fmt.Sprint(msg.Msg), "a=d,d=I,i=42") {
+		t.Fatalf("cleanup message = %#v", msg)
+	}
+}
+
+func TestTUIModelANSIProtocolDoesNotRequestNativePreview(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Date: "2024-09-27", PreviewPath: "/preview.jpg"}}, nil, "KEY")
+	m.imageProtocol = imageProtocolANSI
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	if cmd != nil || m.nativeRequest != "" {
+		t.Fatalf("ANSI resize command = %v, native request = %q", cmd, m.nativeRequest)
+	}
+}
+
+func TestTUIModelRendersWezTermPreviewAfterReservationFrame(t *testing.T) {
+	record := APODRecord{Date: "2024-09-27", PreviewPath: "/preview.jpg"}
+	m := newTUIModel([]APODRecord{record}, nil, "KEY")
+	m.imageProtocol = imageProtocolWezTerm
+	m.nativePending = make(map[uint32]struct{})
+	m.nativeKnown = make(map[uint32]struct{})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	native := nativeImage{id: 42, path: record.PreviewPath, width: m.previewArea.width, height: m.previewArea.height, protocol: imageProtocolWezTerm, transmission: "wezterm sequence", placement: "wezterm placement", placeholders: "blank grid"}
+
+	updated, cmd := m.Update(nativeImagePreparedMsg{image: native, key: m.nativeRequest})
+	m = updated.(tuiModel)
+	if cmd == nil || m.nativeImage.id != 42 {
+		t.Fatalf("command = %v, native image = %#v", cmd, m.nativeImage)
+	}
+	if !strings.Contains(m.detail.View(), native.placeholders) {
+		t.Fatalf("detail = %q, want reservation grid", m.detail.View())
+	}
+	if strings.Contains(m.View().Content, native.transmission) {
+		t.Fatal("WezTerm placement is emitted before the reservation frame settles")
+	}
+	if m.nativeOutput == nil {
+		t.Fatal("native output is nil")
+	}
+}
+
+func TestTUIModelKeepsWezTermPreviewAcrossUnrelatedFrames(t *testing.T) {
+	record := APODRecord{Date: "2024-09-27", PreviewPath: "/preview.jpg"}
+	m := newTUIModel([]APODRecord{record}, nil, "KEY")
+	m.imageProtocol = imageProtocolWezTerm
+	m.nativePending = make(map[uint32]struct{})
+	m.nativeKnown = make(map[uint32]struct{})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	native := nativeImage{id: 42, path: record.PreviewPath, width: m.previewArea.width, height: m.previewArea.height, protocol: imageProtocolWezTerm, transmission: "wezterm sequence", placeholders: blankImageGrid(m.previewArea.width, m.previewArea.height)}
+	updated, _ = m.Update(nativeImageActivatedMsg{image: native, key: m.nativeRequest})
+	m = updated.(tuiModel)
+
+	updated, cmd := m.Update(urlOpenedMsg{target: "APOD page"})
+	m = updated.(tuiModel)
+	if cmd != nil {
+		t.Fatal("status update scheduled an image-clearing command")
+	}
+	if m.nativeImage.id != 42 {
+		t.Fatal("WezTerm placement was discarded after unrelated update")
+	}
+}
+
+func TestTUIModelWezTermCleanupDeletesPlacement(t *testing.T) {
+	record := APODRecord{Date: "2024-09-27", PreviewPath: "/preview.jpg"}
+	m := newTUIModel([]APODRecord{record}, nil, "KEY")
+	m.imageProtocol = imageProtocolWezTerm
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	m.nativeImage = nativeImage{id: 42, path: record.PreviewPath, protocol: imageProtocolWezTerm}
+
+	cmd := m.clearNativeImage()
+	if cmd == nil {
+		t.Fatal("iTerm cleanup command = nil")
+	}
+	if m.nativeImage.protocol != "" {
+		t.Fatalf("native protocol = %q after cleanup", m.nativeImage.protocol)
+	}
+	msg := cmd().(tea.RawMsg)
+	if !strings.Contains(fmt.Sprint(msg.Msg), "a=d,d=I,i=42") {
+		t.Fatalf("cleanup = %#v", msg)
+	}
+}
+
+func TestTUIModelRetriesNativePreviewAfterPreparationError(t *testing.T) {
+	record := APODRecord{Date: "2024-09-27", PreviewPath: "/preview.jpg"}
+	m := newTUIModel([]APODRecord{record}, nil, "KEY")
+	m.imageProtocol = imageProtocolWezTerm
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	request := m.nativeRequest
+
+	updated, _ = m.Update(nativeImagePreparedMsg{key: request, err: os.ErrNotExist})
+	m = updated.(tuiModel)
+	if m.nativeTarget != "" {
+		t.Fatalf("native target = %q after preparation error", m.nativeTarget)
+	}
+	if cmd := m.requestNativeImage(); cmd == nil {
+		t.Fatal("native retry command = nil")
+	}
+}
+
+func TestTUIModelNativeImagePositionAccountsForFavoriteMetadata(t *testing.T) {
+	record := APODRecord{Date: "2024-09-27", PreviewPath: "/preview.jpg"}
+	m := newTUIModel([]APODRecord{record}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	x, y := m.nativeImagePosition()
+	m.recentRecords[0].Favorite = true
+	m.syncListItems()
+	_, favoriteY := m.nativeImagePosition()
+	if x <= 0 || y <= 0 || favoriteY != y+1 {
+		t.Fatalf("normal position = %d,%d; favorite y = %d", x, y, favoriteY)
+	}
+}
+
+func TestTUIModelNativeImagePositionAccountsForWrappedTitle(t *testing.T) {
+	short := APODRecord{Date: "2024-09-27", Title: "Short", PreviewPath: "/preview.jpg"}
+	m := newTUIModel([]APODRecord{short}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
+	m = updated.(tuiModel)
+	_, shortY := m.nativeImagePosition()
+
+	m.recentRecords[0].Title = strings.Repeat("A wrapped title ", 12)
+	m.syncListItems()
+	m.refreshDetail(true)
+	_, wrappedY := m.nativeImagePosition()
+	if wrappedY <= shortY {
+		t.Fatalf("wrapped title y = %d, short title y = %d", wrappedY, shortY)
+	}
+	if wrappedY+m.previewArea.height > verticalOuterInset+m.detailStyle.GetBorderTopSize()+m.detail.Height() {
+		t.Fatalf("native image bottom %d exceeds detail content bottom", wrappedY+m.previewArea.height)
+	}
+}
+
+func TestTUIModelNativePreviewNeverExceedsDetailWidth(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Date: "2024-09-27", PreviewPath: "/preview.jpg"}}, nil, "KEY")
+	m.imageProtocol = imageProtocolWezTerm
+	for _, width := range []int{20, 30, 40, 60} {
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 20})
+		m = updated.(tuiModel)
+		if m.previewArea.width > m.detail.Width() {
+			t.Fatalf("window width %d: preview width %d exceeds detail width %d", width, m.previewArea.width, m.detail.Width())
+		}
+	}
+}
+
+func TestTUIModelResizeInvalidatesNativePreview(t *testing.T) {
+	record := APODRecord{Date: "2024-09-27", PreviewPath: "/preview.jpg"}
+	m := newTUIModel([]APODRecord{record}, nil, "KEY")
+	m.imageProtocol = imageProtocolKitty
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	firstKey := m.nativeRequest
+	m.nativeImage = nativeImage{id: 42, path: record.PreviewPath, width: m.previewArea.width, height: m.previewArea.height, protocol: imageProtocolKitty}
+
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	if cmd == nil || m.nativeRequest == firstKey {
+		t.Fatalf("resize command = %v, request key = %q", cmd, m.nativeRequest)
+	}
+}
+
+func TestTUIModelStaleNativeActivationCannotDeleteNewGeneration(t *testing.T) {
+	record := APODRecord{Date: "2024-09-27", PreviewPath: "/preview.jpg"}
+	m := newTUIModel([]APODRecord{record}, nil, "KEY")
+	m.imageProtocol = imageProtocolKitty
+	m.nativePending = make(map[uint32]struct{})
+	m.nativeKnown = make(map[uint32]struct{})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	oldKey := m.nativeRequest
+	oldImage := nativeImage{id: 41, path: record.PreviewPath, width: m.previewArea.width, height: m.previewArea.height, protocol: imageProtocolKitty}
+
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	newKey := m.nativeRequest
+	newImage := nativeImage{id: 42, path: record.PreviewPath, width: m.previewArea.width, height: m.previewArea.height, protocol: imageProtocolKitty, placeholders: "new"}
+	updated, _ = m.Update(nativeImageActivatedMsg{image: newImage, key: newKey})
+	m = updated.(tuiModel)
+	updated, cmd := m.Update(nativeImageActivatedMsg{image: oldImage, key: oldKey})
+	m = updated.(tuiModel)
+
+	if m.nativeImage.id != 42 {
+		t.Fatalf("active native image = %d, want 42", m.nativeImage.id)
+	}
+	msg := cmd().(tea.RawMsg)
+	sequence := fmt.Sprint(msg.Msg)
+	if !strings.Contains(sequence, "i=41") || strings.Contains(sequence, "i=42") {
+		t.Fatalf("stale cleanup = %q", sequence)
+	}
+}
+
 func TestTUIModelWindowResizeSetsReady(t *testing.T) {
 	m := newTUIModel(nil, nil, "KEY")
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
@@ -377,7 +598,7 @@ func TestNewTUIModelFromLibraryStartsWithCachedRecords(t *testing.T) {
 		t.Fatalf("upsertAPOD() error: %v", err)
 	}
 
-	model, err := newTUIModelFromLibrary(db, paths, "KEY", time.Date(2024, 9, 27, 9, 0, 0, 0, time.UTC))
+	model, err := newTUIModelFromLibrary(db, paths, "KEY", imageProtocolANSI, time.Date(2024, 9, 27, 9, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("newTUIModelFromLibrary() error: %v", err)
 	}
@@ -407,7 +628,7 @@ func TestTUIModelAddsBackgroundSyncItemsIncrementally(t *testing.T) {
 	defer db.Close()
 
 	now := time.Date(2024, 9, 27, 9, 0, 0, 0, time.UTC)
-	model, err := newTUIModelFromLibrary(db, paths, "KEY", now)
+	model, err := newTUIModelFromLibrary(db, paths, "KEY", imageProtocolANSI, now)
 	if err != nil {
 		t.Fatalf("newTUIModelFromLibrary() error: %v", err)
 	}

@@ -20,6 +20,7 @@ func main() {
 		verbose        bool
 		output         string
 		date           string
+		imageProtocol  string
 		tuiMode        bool
 		cycleFavorites bool
 		syncOnly       bool
@@ -31,6 +32,7 @@ func main() {
 	flag.BoolVarP(&verbose, "verbose", "v", true, "Show details about the image")
 	flag.StringVarP(&output, "output", "o", "", "Save image to this path (default: ~/Pictures/apod_wallpaper.jpg)")
 	flag.StringVarP(&date, "date", "d", "", "Fetch APOD for a specific date (YYYY-MM-DD)")
+	flag.StringVar(&imageProtocol, "image-protocol", "auto", "TUI image protocol: auto, kitty, wezterm, or ansi")
 	flag.BoolVar(&tuiMode, "tui", false, "Launch the text-based APOD browser")
 	flag.BoolVar(&cycleFavorites, "cycle-favorites", false, "Set the next favorite wallpaper from the local library")
 	flag.BoolVar(&syncOnly, "sync-only", false, "Sync the local APOD library and preview cache, then exit")
@@ -50,6 +52,11 @@ func main() {
 	}
 
 	key := resolveAPIKey(apiKey)
+	protocol, err := parseImageProtocol(imageProtocol)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	if random && date != "" {
 		fmt.Fprintln(os.Stderr, "Error: --random and --date cannot be used together.")
@@ -57,6 +64,10 @@ func main() {
 	}
 	if tuiMode && (random || date != "" || output != "") {
 		fmt.Fprintln(os.Stderr, "Error: --tui cannot be combined with --random, --date, or --output.")
+		os.Exit(1)
+	}
+	if !tuiMode && protocol != imageProtocolAuto {
+		fmt.Fprintln(os.Stderr, "Error: --image-protocol can only be used with --tui.")
 		os.Exit(1)
 	}
 	if tuiMode && syncOnly {
@@ -76,7 +87,7 @@ func main() {
 	defer db.Close()
 
 	if tuiMode {
-		if err := runTUI(db, paths, key); err != nil {
+		if err := runTUI(db, paths, key, protocol); err != nil {
 			fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
 			os.Exit(1)
 		}
