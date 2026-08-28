@@ -91,6 +91,7 @@ type tuiModel struct {
 	ready           bool
 	loading         bool
 	showHelp        bool
+	showDescription bool
 	syncing         bool
 	syncItems       []APODResponse
 	syncTotal       int
@@ -187,7 +188,7 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 		recentRecords:   recentRecords,
 		favoriteRecords: favoriteRecords,
 		apiKey:          apiKey,
-		status:          "j/k move • tab switch pane • enter set wallpaper • f favorite • o page • u media • ? help • q quit",
+		status:          "j/k move • tab switch pane • d description • enter set wallpaper • f favorite • o page • u media • ? help • q quit",
 		activePane:      recentPane,
 		spinner:         spin,
 		listStyle:       lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(0, 1),
@@ -254,11 +255,30 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshDetail(true)
 			return m, nil
 		}
+		if m.descriptionVisible() && isDetailScrollKey(msg) {
+			var cmd tea.Cmd
+			m.detail, cmd = m.detail.Update(msg)
+			return m, cmd
+		}
 
 		switch msg.String() {
 		case "q", "ctrl+c":
 			m.cancelBackgroundSync()
 			return m, tea.Quit
+		case "d":
+			if m.selectedRecord().PreviewPath == "" {
+				m.refreshDetail(true)
+				m.status = "No preview available • showing APOD description"
+				return m, nil
+			}
+			m.showDescription = !m.showDescription
+			m.refreshDetail(true)
+			if m.showDescription {
+				m.status = "Showing APOD description • PgUp/PgDown or Ctrl+U/Ctrl+D scroll • d image"
+			} else {
+				m.status = "Showing APOD image • d description"
+			}
+			return m, nil
 		case "f":
 			if m.loading {
 				return m, nil
@@ -378,6 +398,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("Favorite update failed: %v", msg.err)
 			return m, nil
 		}
+		selectedDate := m.selectedRecord().Date
+		previousPane := m.activePane
 		m.updateFavoriteInRecent(msg.date, msg.favorite)
 		favorites, err := listFavoriteAPODs(m.db)
 		if err != nil {
@@ -394,6 +416,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resize()
 		} else {
 			m.refreshDetail(false)
+		}
+		if m.activePane != previousPane || m.selectedRecord().Date != selectedDate {
+			m.detail.GotoTop()
 		}
 		if msg.favorite {
 			m.status = fmt.Sprintf("Added %s to favorites", msg.title)
@@ -451,7 +476,7 @@ func (m tuiModel) View() tea.View {
 	}
 	lineWidth := max(1, m.width-horizontalOuterInset*2)
 	status = ansi.Truncate(status, lineWidth, "")
-	helpLine := ansi.Truncate(fmt.Sprintf("Active pane: %s • Tab/Shift+Tab panes • j/k move • f favorite • o page • u media • enter wallpaper • ? help • q quit", m.activePaneLabel()), lineWidth, "")
+	helpLine := ansi.Truncate(fmt.Sprintf("Active pane: %s • Tab/Shift+Tab panes • j/k move • d %s • f favorite • o page • u media • enter wallpaper • ? help • q quit", m.activePaneLabel(), m.detailToggleLabel()), lineWidth, "")
 	textInset := strings.Repeat(" ", horizontalOuterInset)
 
 	body := lipgloss.JoinVertical(
@@ -527,7 +552,9 @@ func (m *tuiModel) refreshDetail(resetScroll bool) {
 	if record.Favorite {
 		parts = append(parts, "Favorite: yes")
 	}
-	if record.PreviewPath != "" {
+	if m.descriptionVisible() {
+		parts = append(parts, "", "Description", "", strings.TrimSpace(record.Description))
+	} else if record.PreviewPath != "" {
 		if preview, err := renderPreviewBlock(record.PreviewPath, m.previewArea.width, m.previewArea.height); err == nil && preview != "" {
 			parts = append(parts, preview)
 		} else {
@@ -535,14 +562,26 @@ func (m *tuiModel) refreshDetail(resetScroll bool) {
 			parts = append(parts, "Preview could not be rendered in this terminal session.")
 		}
 	}
-	parts = append(parts, "")
-	parts = append(parts, strings.TrimSpace(record.Description))
 	wrappedContent := wordwrap.String(strings.Join(parts, "\n"), max(20, m.detail.Width()))
 
 	m.detail.SetContent(wrappedContent)
 	if resetScroll {
 		m.detail.GotoTop()
 	}
+}
+
+func (m tuiModel) descriptionVisible() bool {
+	return m.showDescription || m.selectedRecord().PreviewPath == ""
+}
+
+func (m tuiModel) detailToggleLabel() string {
+	if m.selectedRecord().PreviewPath == "" {
+		return "description"
+	}
+	if m.showDescription {
+		return "image"
+	}
+	return "description"
 }
 
 func (m tuiModel) selectedRecord() APODRecord {
@@ -878,6 +917,15 @@ func isPreviousPaneKey(msg tea.KeyPressMsg) bool {
 	return msg.String() == "shift+tab"
 }
 
+func isDetailScrollKey(msg tea.KeyPressMsg) bool {
+	switch msg.String() {
+	case "pgup", "pgdown", "ctrl+u", "ctrl+d":
+		return true
+	default:
+		return false
+	}
+}
+
 func isHelpCloseKey(msg tea.KeyPressMsg) bool {
 	key := msg.Key()
 	if key.Code == tea.KeyEscape || key.Code == tea.KeyEsc {
@@ -918,6 +966,9 @@ func (m tuiModel) renderHelpView() string {
 		"",
 		"Actions",
 		"  Enter              Download/apply wallpaper for selected APOD",
+		"  d                  Toggle image and description views",
+		"  PgUp / PgDown      Scroll the description view",
+		"  Ctrl+U / Ctrl+D    Scroll half a description page",
 		"  f                  Favorite or unfavorite the selected APOD",
 		"  o                  Open the APOD page in your browser",
 		"  u                  Open the selected media URL",

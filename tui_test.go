@@ -32,6 +32,101 @@ func TestNewTUIModel_SelectsNewestRecord(t *testing.T) {
 	}
 }
 
+func TestTUIModelTogglesImageAndDescription(t *testing.T) {
+	records := []APODRecord{{
+		Date:        "2024-09-27",
+		Title:       "Previewed",
+		Description: "A description shown only in description mode.",
+		MediaType:   "image",
+		PreviewPath: filepath.Join(t.TempDir(), "missing-preview.jpg"),
+	}}
+	m := newTUIModel(records, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+
+	if strings.Contains(m.detail.View(), records[0].Description) {
+		t.Fatalf("image detail contains description before toggle: %q", m.detail.View())
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "d", Code: 'd'})
+	m = updated.(tuiModel)
+	if !m.showDescription {
+		t.Fatal("showDescription = false after d")
+	}
+	if !strings.Contains(m.detail.View(), records[0].Description) {
+		t.Fatalf("description detail = %q", m.detail.View())
+	}
+	if !strings.Contains(m.detail.View(), "Description") {
+		t.Fatalf("description heading missing from %q", m.detail.View())
+	}
+
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "d", Code: 'd'})
+	m = updated.(tuiModel)
+	if m.showDescription {
+		t.Fatal("showDescription = true after second d")
+	}
+	if strings.Contains(m.detail.View(), records[0].Description) {
+		t.Fatalf("image detail contains description after second toggle: %q", m.detail.View())
+	}
+}
+
+func TestTUIModelShowsDescriptionWhenPreviewIsUnavailable(t *testing.T) {
+	record := APODRecord{Date: "2024-09-27", Title: "No preview", Description: "Automatically visible description."}
+	m := newTUIModel([]APODRecord{record}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+
+	if !strings.Contains(m.detail.View(), record.Description) {
+		t.Fatalf("detail = %q, want automatic description", m.detail.View())
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "d", Code: 'd'})
+	m = updated.(tuiModel)
+	if m.showDescription || !strings.Contains(m.status, "No preview available") {
+		t.Fatalf("showDescription = %t, status = %q", m.showDescription, m.status)
+	}
+}
+
+func TestTUIModelDescriptionModePersistsAcrossNavigation(t *testing.T) {
+	records := []APODRecord{
+		{Date: "2024-09-27", Title: "Newest", Description: "Newest description.", PreviewPath: "/new.jpg"},
+		{Date: "2024-09-26", Title: "Older", Description: "Older description.", PreviewPath: "/old.jpg"},
+	}
+	m := newTUIModel(records, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "d", Code: 'd'})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "j", Code: 'j'})
+	m = updated.(tuiModel)
+
+	if !m.showDescription || m.selectedRecord().Date != "2024-09-26" {
+		t.Fatalf("showDescription = %t, selected date = %q", m.showDescription, m.selectedRecord().Date)
+	}
+	if !strings.Contains(m.detail.View(), "Older description.") {
+		t.Fatalf("detail = %q", m.detail.View())
+	}
+}
+
+func TestTUIModelScrollsDescriptionWithoutChangingSelection(t *testing.T) {
+	records := []APODRecord{
+		{Date: "2024-09-27", Title: "Newest", Description: strings.Repeat("Long description line.\n", 60), PreviewPath: "/preview.jpg"},
+		{Date: "2024-09-26", Title: "Older", Description: "Older description."},
+	}
+	m := newTUIModel(records, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "d", Code: 'd'})
+	m = updated.(tuiModel)
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	m = updated.(tuiModel)
+	if m.detail.YOffset() == 0 {
+		t.Fatal("description viewport did not scroll")
+	}
+	if got := m.selectedRecord().Date; got != "2024-09-27" {
+		t.Fatalf("selected date = %q after detail scroll", got)
+	}
+}
+
 func TestTUIModelWindowResizeSetsReady(t *testing.T) {
 	m := newTUIModel(nil, nil, "KEY")
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
