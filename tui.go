@@ -140,11 +140,15 @@ func (t *commandTracker) closeAndWait() {
 }
 
 const (
-	statusLineCount       = 2
-	horizontalPaneGap     = 1
-	verticalPaneGap       = 0
-	detailHeaderLineCount = 4
+	statusLineCount        = 2
+	verticalOuterInset     = 1
+	verticalInterPaneGap   = 0
+	horizontalOuterInset   = 2
+	horizontalInterPaneGap = 1
+	detailHeaderLineCount  = 4
 )
+
+var selectedAccent = lipgloss.Color("#EE6FF8")
 
 func newListModel(title string, records []APODRecord) list.Model {
 	items := make([]list.Item, 0, len(records))
@@ -154,6 +158,8 @@ func newListModel(title string, records []APODRecord) list.Model {
 	delegate := list.NewDefaultDelegate()
 	delegate.SetSpacing(0)
 	delegate.ShowDescription = true
+	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(selectedAccent)
+	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(selectedAccent)
 
 	listModel := list.New(items, delegate, 0, 0)
 	listModel.Title = title
@@ -184,8 +190,8 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 		status:          "j/k move • tab switch pane • enter set wallpaper • f favorite • o page • u media • ? help • q quit",
 		activePane:      recentPane,
 		spinner:         spin,
-		listStyle:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1),
-		detailStyle:     lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1),
+		listStyle:       lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(0, 1),
+		detailStyle:     lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(0, 1),
 		statusStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("241")),
 		helpStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("244")),
 	}
@@ -429,9 +435,11 @@ func (m tuiModel) View() tea.View {
 	}
 
 	panes := lipgloss.JoinHorizontal(lipgloss.Top,
+		strings.Repeat(" ", horizontalOuterInset),
 		leftColumn,
-		strings.Repeat(" ", horizontalPaneGap),
+		strings.Repeat(" ", horizontalInterPaneGap),
 		m.detailStyle.Render(detailView),
+		strings.Repeat(" ", horizontalOuterInset),
 	)
 
 	status := m.status
@@ -441,20 +449,30 @@ func (m tuiModel) View() tea.View {
 	if m.showHelp {
 		status = "Help open — press ? or Esc to close"
 	}
-	lineWidth := max(1, m.width-1)
+	lineWidth := max(1, m.width-horizontalOuterInset*2)
 	status = ansi.Truncate(status, lineWidth, "")
 	helpLine := ansi.Truncate(fmt.Sprintf("Active pane: %s • Tab/Shift+Tab panes • j/k move • f favorite • o page • u media • enter wallpaper • ? help • q quit", m.activePaneLabel()), lineWidth, "")
+	textInset := strings.Repeat(" ", horizontalOuterInset)
 
 	body := lipgloss.JoinVertical(
 		lipgloss.Left,
+		layoutSpacer(verticalOuterInset),
 		panes,
-		m.statusStyle.Render(status),
-		m.helpStyle.Render(helpLine),
+		textInset+m.statusStyle.Render(status),
+		textInset+m.helpStyle.Render(helpLine),
+		layoutSpacer(verticalOuterInset),
 	)
 
 	view := tea.NewView(body)
 	view.AltScreen = true
 	return view
+}
+
+func layoutSpacer(height int) string {
+	if height <= 0 {
+		return ""
+	}
+	return strings.Repeat("\n", height-1) + " "
 }
 
 func (m *tuiModel) resize() {
@@ -465,8 +483,8 @@ func (m *tuiModel) resize() {
 	listHorizontalFrame, listVerticalFrame := m.listStyle.GetFrameSize()
 	detailHorizontalFrame, detailVerticalFrame := m.detailStyle.GetFrameSize()
 
-	contentHeight := max(1, m.height-statusLineCount)
-	availableWidth := max(2, m.width-horizontalPaneGap)
+	contentHeight := max(1, m.height-statusLineCount-verticalOuterInset*2-verticalInterPaneGap*2)
+	availableWidth := max(2, m.width-horizontalOuterInset*2-horizontalInterPaneGap)
 	leftOuterWidth := availableWidth / 3
 	if m.width >= 40 {
 		leftOuterWidth = max(20, leftOuterWidth)
@@ -477,7 +495,7 @@ func (m *tuiModel) resize() {
 	// The list view reserves one cursor column beyond its configured width.
 	listInnerWidth := max(1, leftOuterWidth-listHorizontalFrame-1)
 	detailInnerWidth := max(1, rightOuterWidth-detailHorizontalFrame)
-	leftInnerHeight := max(2, contentHeight-listVerticalFrame*2-verticalPaneGap)
+	leftInnerHeight := max(2, contentHeight-listVerticalFrame*2-verticalInterPaneGap)
 	recentInnerHeight := (leftInnerHeight + 1) / 2
 	favoriteInnerHeight := leftInnerHeight / 2
 	detailInnerHeight := max(1, contentHeight-detailVerticalFrame)
@@ -772,12 +790,13 @@ func (m tuiModel) nextPane(reverse bool) activePane {
 func (m tuiModel) renderListPane(pane activePane, listModel list.Model) string {
 	style := m.listStyle
 	if m.activePane == pane {
-		style = style.BorderForeground(lipgloss.Color("39")).Bold(true)
+		style = style.BorderForeground(selectedAccent).Bold(true)
 	}
+	horizontalFrame, verticalFrame := style.GetFrameSize()
+	outerWidth := listModel.Width() + horizontalFrame + 1
 	style = style.
-		Width(listModel.Width() + 1).
-		MaxWidth(listModel.Width() + 1)
-	_, verticalFrame := style.GetFrameSize()
+		Width(outerWidth).
+		MaxWidth(outerWidth)
 	rendered := style.Render(limitBlock(listModel.View(), listModel.Width()+1, listModel.Height()))
 	return limitRenderedPane(rendered, listModel.Height()+verticalFrame)
 }

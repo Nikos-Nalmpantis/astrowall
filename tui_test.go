@@ -122,14 +122,14 @@ func TestTUIModelUsesFixedPaneGapsAcrossResizes(t *testing.T) {
 		detailHorizontalFrame, _ := m.detailStyle.GetFrameSize()
 		leftWidth := m.recentList.Width() + listHorizontalFrame + 1
 		rightWidth := m.detail.Width() + detailHorizontalFrame
-		if got := size.Width - leftWidth - rightWidth; got != horizontalPaneGap {
-			t.Fatalf("%dx%d horizontal gap = %d, want %d", size.Width, size.Height, got, horizontalPaneGap)
+		if got := size.Width - leftWidth - rightWidth; got != horizontalOuterInset*2+horizontalInterPaneGap {
+			t.Fatalf("%dx%d total horizontal spacing = %d, want %d", size.Width, size.Height, got, horizontalOuterInset*2+horizontalInterPaneGap)
 		}
 
-		contentHeight := size.Height - statusLineCount
+		contentHeight := size.Height - statusLineCount - verticalOuterInset*2 - verticalInterPaneGap*2
 		listHeight := m.recentList.Height() + m.favoriteList.Height() + listVerticalFrame*2
-		if got := contentHeight - listHeight; got != verticalPaneGap {
-			t.Fatalf("%dx%d vertical gap = %d, want %d", size.Width, size.Height, got, verticalPaneGap)
+		if got := contentHeight - listHeight; got != verticalInterPaneGap {
+			t.Fatalf("%dx%d inter-pane vertical spacing = %d, want %d", size.Width, size.Height, got, verticalInterPaneGap)
 		}
 
 		leftColumn := lipgloss.JoinVertical(
@@ -139,8 +139,20 @@ func TestTUIModelUsesFixedPaneGapsAcrossResizes(t *testing.T) {
 		)
 		lines := strings.Split(ansi.Strip(leftColumn), "\n")
 		recentHeight := lipgloss.Height(m.renderListPane(recentPane, m.recentList))
-		if !strings.HasPrefix(lines[recentHeight], "╭") {
-			t.Fatalf("%dx%d favorites did not start immediately after recent pane: %q", size.Width, size.Height, lines[recentHeight])
+		if !strings.HasPrefix(lines[recentHeight+verticalInterPaneGap], "╔") {
+			t.Fatalf("%dx%d favorites did not start at computed boundary: %q", size.Width, size.Height, lines[recentHeight+verticalInterPaneGap])
+		}
+
+		leftPane := m.renderListPane(recentPane, m.recentList)
+		detailPane := m.detailStyle.Render(m.detail.View())
+		if got := lipgloss.Width(leftPane); got != leftWidth {
+			t.Fatalf("%dx%d rendered left width = %d, allocated %d", size.Width, size.Height, got, leftWidth)
+		}
+		if got := lipgloss.Width(detailPane); got != rightWidth {
+			t.Fatalf("%dx%d rendered detail width = %d, allocated %d", size.Width, size.Height, got, rightWidth)
+		}
+		if got := horizontalOuterInset*2 + lipgloss.Width(leftPane) + horizontalInterPaneGap + lipgloss.Width(detailPane); got != size.Width {
+			t.Fatalf("%dx%d rendered pane row width = %d", size.Width, size.Height, got)
 		}
 	}
 }
@@ -181,9 +193,31 @@ func TestTUIModelListPanesRenderBottomBorders(t *testing.T) {
 	} {
 		lines := strings.Split(pane, "\n")
 		bottom := ansi.Strip(lines[len(lines)-1])
-		if !strings.HasPrefix(bottom, "╰") || !strings.HasSuffix(bottom, "╯") {
+		if !strings.HasPrefix(bottom, "╚") || !strings.HasSuffix(bottom, "╝") {
 			t.Fatalf("%s bottom border = %q", name, bottom)
 		}
+	}
+}
+
+func TestTUIModelUsesEqualOuterAndContentGaps(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Date: "2024-09-27", Title: "Recent"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
+
+	if strings.TrimSpace(lines[0]) != "" {
+		t.Fatalf("top inset = %q, want blank", lines[0])
+	}
+	if !strings.HasPrefix(lines[verticalOuterInset], strings.Repeat(" ", horizontalOuterInset)+"╔") {
+		t.Fatalf("first pane line = %q, want %d-cell left inset", lines[verticalOuterInset], horizontalOuterInset)
+	}
+	if strings.TrimSpace(lines[len(lines)-1]) != "" {
+		t.Fatalf("bottom inset = %q, want blank", lines[len(lines)-1])
+	}
+
+	detailBottom := verticalOuterInset + lipgloss.Height(m.detailStyle.Render(m.detail.View()))
+	if !strings.HasPrefix(lines[detailBottom+verticalInterPaneGap], strings.Repeat(" ", horizontalOuterInset)) {
+		t.Fatalf("status line = %q, want %d-cell left inset", lines[detailBottom+verticalInterPaneGap], horizontalOuterInset)
 	}
 }
 
