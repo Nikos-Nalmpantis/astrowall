@@ -8,9 +8,11 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/reflow/wordwrap"
 )
 
@@ -47,6 +49,12 @@ type favoriteToggledMsg struct {
 	err      error
 }
 
+type urlOpenedMsg struct {
+	target string
+	url    string
+	err    error
+}
+
 type activePane int
 
 const (
@@ -68,7 +76,9 @@ type tuiModel struct {
 	height          int
 	ready           bool
 	loading         bool
+	showHelp        bool
 	activePane      activePane
+	spinner         spinner.Model
 	listStyle       lipgloss.Style
 	detailStyle     lipgloss.Style
 	statusStyle     lipgloss.Style
@@ -80,6 +90,15 @@ type imageArea struct {
 	width  int
 	height int
 }
+
+const (
+	statusLineCount       = 2
+	detailHeaderLineCount = 4
+	listTitleLineCount    = 2
+	listItemLineCount     = 2
+	minListInnerHeight    = 4
+	minRecentInnerHeight  = 8
+)
 
 func newListModel(title string, records []APODRecord) list.Model {
 	items := make([]list.Item, 0, len(records))
@@ -106,6 +125,8 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 	favoriteList := newListModel("Favorites", favoriteRecords)
 	detail := viewport.New()
 	detail.SetContent("No APODs loaded.")
+	spin := spinner.New()
+	spin.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 
 	m := tuiModel{
 		recentList:      recentList,
@@ -114,8 +135,9 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 		recentRecords:   recentRecords,
 		favoriteRecords: favoriteRecords,
 		apiKey:          apiKey,
-		status:          "j/k move • tab switch pane • enter set wallpaper • f favorite • q quit",
+		status:          "j/k move • tab switch pane • enter set wallpaper • f favorite • o page • u media • ? help • q quit",
 		activePane:      recentPane,
+		spinner:         spin,
 		listStyle:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1),
 		detailStyle:     lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1),
 		statusStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("241")),
@@ -139,7 +161,31 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resize()
 		return m, nil
 
+	case spinner.TickMsg:
+		if !m.loading {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+
 	case tea.KeyPressMsg:
+		if isHelpToggleKey(msg) {
+			m.showHelp = !m.showHelp
+			return m, nil
+		}
+		if m.showHelp {
+			switch {
+			case isHelpCloseKey(msg):
+				m.showHelp = false
+				return m, nil
+			case msg.String() == "q", msg.String() == "ctrl+c":
+				return m, tea.Quit
+			default:
+				return m, nil
+			}
+		}
+
 		if isNextPaneKey(msg) {
 			m.activePane = m.nextPane(false)
 			m.updatePaneTitles()
@@ -166,6 +212,30 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.status = fmt.Sprintf("Toggling favorite for %s…", record.Title)
 			return m, toggleFavoriteCmd(m.db, record.Date)
+		case "o":
+			record := m.selectedRecord()
+			if record.Date == "" {
+				return m, nil
+			}
+			url := apodPageURL(record.Date)
+			if url == "" {
+				m.status = "No APOD page URL available for this item"
+				return m, nil
+			}
+			m.status = fmt.Sprintf("Opening APOD page for %s…", record.Title)
+			return m, openURLCmd("APOD page", url)
+		case "u":
+			record := m.selectedRecord()
+			if record.Date == "" {
+				return m, nil
+			}
+			url := preferredMediaURL(record)
+			if url == "" {
+				m.status = "No media URL available for this item"
+				return m, nil
+			}
+			m.status = fmt.Sprintf("Opening media URL for %s…", record.Title)
+			return m, openURLCmd("media URL", url)
 		case "enter":
 			if m.loading {
 				return m, nil
@@ -176,7 +246,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.loading = true
 			m.status = fmt.Sprintf("Setting wallpaper for %s…", record.Title)
-			return m, applyWallpaperCmd(m.db, m.paths, record, m.apiKey)
+			return m, tea.Batch(applyWallpaperCmd(m.db, m.paths, record, m.apiKey), spinnerTickCmd(m.spinner))
 		}
 
 	case wallpaperAppliedMsg:
@@ -189,6 +259,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncListItems()
 		m.refreshDetail(false)
 		m.status = fmt.Sprintf("Wallpaper set to %s", msg.title)
+		return m, nil
+
+	case urlOpenedMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("Failed to open %s: %v", msg.target, msg.err)
+			return m, nil
+		}
+		m.status = fmt.Sprintf("Opened %s", msg.target)
 		return m, nil
 
 	case favoriteToggledMsg:
@@ -208,7 +286,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updatePaneTitles()
 		}
 		m.syncListItems()
-		m.refreshDetail(false)
+		if m.ready {
+			m.resize()
+		} else {
+			m.refreshDetail(false)
+		}
 		if msg.favorite {
 			m.status = fmt.Sprintf("Added %s to favorites", msg.title)
 		} else {
@@ -240,16 +322,35 @@ func (m tuiModel) View() tea.View {
 		m.renderListPane(favoritesPane, m.favoriteList),
 	)
 
+	detailView := m.detail.View()
+	if m.showHelp {
+		help := m.detail
+		help.SetContent(wordwrap.String(m.renderHelpView(), max(1, help.Width())))
+		help.GotoTop()
+		detailView = help.View()
+	}
+
 	panes := lipgloss.JoinHorizontal(lipgloss.Top,
 		leftColumn,
-		m.detailStyle.Render(m.detail.View()),
+		m.detailStyle.Render(detailView),
 	)
+
+	status := m.status
+	if m.loading {
+		status = fmt.Sprintf("%s %s", m.spinner.View(), status)
+	}
+	if m.showHelp {
+		status = "Help open — press ? or Esc to close"
+	}
+	lineWidth := max(1, m.width-1)
+	status = ansi.Truncate(status, lineWidth, "")
+	helpLine := ansi.Truncate(fmt.Sprintf("Active pane: %s • Tab/Shift+Tab panes • j/k move • f favorite • o page • u media • enter wallpaper • ? help • q quit", m.activePaneLabel()), lineWidth, "")
 
 	body := lipgloss.JoinVertical(
 		lipgloss.Left,
 		panes,
-		m.statusStyle.Render(m.status),
-		m.helpStyle.Render(fmt.Sprintf("Active pane: %s • Tab/Shift+Tab switch panes • j/k navigate • f favorite • enter set wallpaper • q quit", m.activePaneLabel())),
+		m.statusStyle.Render(status),
+		m.helpStyle.Render(helpLine),
 	)
 
 	view := tea.NewView(body)
@@ -262,17 +363,35 @@ func (m *tuiModel) resize() {
 		return
 	}
 
-	contentHeight := max(10, m.height-4)
-	leftWidth := max(30, m.width/3)
-	rightWidth := max(40, m.width-leftWidth-6)
-	recentHeight := max(4, contentHeight/2)
-	favoriteHeight := max(4, contentHeight-recentHeight)
+	listHorizontalFrame, listVerticalFrame := m.listStyle.GetFrameSize()
+	detailHorizontalFrame, detailVerticalFrame := m.detailStyle.GetFrameSize()
 
-	m.recentList.SetSize(leftWidth, recentHeight)
-	m.favoriteList.SetSize(leftWidth, favoriteHeight)
-	m.detail.SetWidth(rightWidth)
-	m.detail.SetHeight(contentHeight)
-	m.previewArea = imageArea{width: max(12, rightWidth-4), height: max(6, contentHeight/2)}
+	contentHeight := max(1, m.height-statusLineCount)
+	leftOuterWidth := m.width / 3
+	if m.width >= 40 {
+		leftOuterWidth = max(20, leftOuterWidth)
+	} else {
+		leftOuterWidth = m.width / 2
+	}
+	rightOuterWidth := max(1, m.width-leftOuterWidth)
+	// The list view reserves one cursor column beyond its configured width.
+	listInnerWidth := max(1, leftOuterWidth-listHorizontalFrame-1)
+	detailInnerWidth := max(1, rightOuterWidth-detailHorizontalFrame)
+	leftInnerHeight := max(2, contentHeight-listVerticalFrame*2)
+	favoriteDesiredHeight := desiredListInnerHeight(len(m.favoriteRecords))
+	recentReservedHeight := min(minRecentInnerHeight, leftInnerHeight-1)
+	maxFavoriteHeight := max(1, leftInnerHeight-recentReservedHeight)
+	favoriteInnerHeight := min(favoriteDesiredHeight, maxFavoriteHeight)
+	recentInnerHeight := leftInnerHeight - favoriteInnerHeight
+	detailInnerHeight := max(1, contentHeight-detailVerticalFrame)
+
+	m.recentList.SetSize(listInnerWidth, recentInnerHeight)
+	m.favoriteList.SetSize(listInnerWidth, favoriteInnerHeight)
+	m.detail.SetWidth(detailInnerWidth)
+	m.detail.SetHeight(detailInnerHeight)
+
+	previewHeight := max(6, detailInnerHeight-detailHeaderLineCount)
+	m.previewArea = imageArea{width: max(12, detailInnerWidth), height: previewHeight}
 	m.refreshDetail(false)
 }
 
@@ -303,9 +422,7 @@ func (m *tuiModel) refreshDetail(resetScroll bool) {
 	}
 	parts = append(parts, "")
 	parts = append(parts, strings.TrimSpace(record.Description))
-
-	fullContent := strings.Join(parts, "\n")
-	wrappedContent := wordwrap.String(fullContent, m.detail.Width())
+	wrappedContent := wordwrap.String(strings.Join(parts, "\n"), max(20, m.detail.Width()))
 
 	m.detail.SetContent(wrappedContent)
 	if resetScroll {
@@ -530,4 +647,69 @@ func isPreviousPaneKey(msg tea.KeyPressMsg) bool {
 		return true
 	}
 	return msg.String() == "shift+tab"
+}
+
+func isHelpCloseKey(msg tea.KeyPressMsg) bool {
+	key := msg.Key()
+	if key.Code == tea.KeyEscape || key.Code == tea.KeyEsc {
+		return true
+	}
+	s := msg.String()
+	return s == "esc" || s == "escape" || s == "ctrl+["
+}
+
+func isHelpToggleKey(msg tea.KeyPressMsg) bool {
+	if msg.String() == "?" || msg.String() == "/" {
+		return true
+	}
+	key := msg.Key()
+	if key.Text == "?" || key.Text == "/" {
+		return true
+	}
+	if key.Code == '/' || key.ShiftedCode == '?' {
+		return true
+	}
+	return false
+}
+
+func spinnerTickCmd(spin spinner.Model) tea.Cmd {
+	return func() tea.Msg {
+		return spin.Tick()
+	}
+}
+
+func desiredListInnerHeight(itemCount int) int {
+	return max(minListInnerHeight, listTitleLineCount+itemCount*listItemLineCount)
+}
+
+func (m tuiModel) renderHelpView() string {
+	return strings.Join([]string{
+		"Keybindings",
+		"",
+		"Navigation",
+		"  j / k              Move within the active pane",
+		"  Tab                Switch to the next pane",
+		"  Shift+Tab          Switch to the previous pane",
+		"",
+		"Actions",
+		"  Enter              Download/apply wallpaper for selected APOD",
+		"  f                  Favorite or unfavorite the selected APOD",
+		"  o                  Open the APOD page in your browser",
+		"  u                  Open the selected media URL",
+		"  ?                  Toggle this help view",
+		"  Esc                Close the help view",
+		"  q / Ctrl+C         Quit",
+		"",
+		"Notes",
+		"  - The active pane title includes • active",
+		"  - Favorites persist in the local SQLite library",
+		"  - --cycle-favorites rotates favorites outside the TUI",
+	}, "\n")
+}
+
+func openURLCmd(target, url string) tea.Cmd {
+	return func() tea.Msg {
+		err := openURLFunc(url)
+		return urlOpenedMsg{target: target, url: url, err: err}
+	}
 }

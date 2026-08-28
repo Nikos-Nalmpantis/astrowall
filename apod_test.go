@@ -73,6 +73,47 @@ func TestResolveImagePath_Custom(t *testing.T) {
 	}
 }
 
+func TestAPODPageURL(t *testing.T) {
+	if got := apodPageURL("2024-09-27"); got != "https://apod.nasa.gov/apod/ap240927.html" {
+		t.Fatalf("apodPageURL() = %q", got)
+	}
+	if got := apodPageURL("short"); got != "" {
+		t.Fatalf("apodPageURL(short) = %q, want empty string", got)
+	}
+}
+
+func TestPreferredMediaURL(t *testing.T) {
+	tests := []struct {
+		name   string
+		record APODRecord
+		want   string
+	}{
+		{
+			name:   "image prefers HD URL",
+			record: APODRecord{MediaType: "image", URL: "https://example.com/image.jpg", HDURL: "https://example.com/image-hd.jpg"},
+			want:   "https://example.com/image-hd.jpg",
+		},
+		{
+			name:   "video prefers media URL",
+			record: APODRecord{MediaType: "video", URL: "https://example.com/video", HDURL: "https://example.com/fallback.jpg"},
+			want:   "https://example.com/video",
+		},
+		{
+			name:   "falls back to HD URL",
+			record: APODRecord{HDURL: "https://example.com/fallback.jpg"},
+			want:   "https://example.com/fallback.jpg",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := preferredMediaURL(tt.record); got != tt.want {
+				t.Fatalf("preferredMediaURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFetchAPOD_SingleObject(t *testing.T) {
 	apod := APODResponse{
 		Date:      "2024-09-27",

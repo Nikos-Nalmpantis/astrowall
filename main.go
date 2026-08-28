@@ -215,8 +215,7 @@ func printDetails(apod *APODResponse, imagePath string) {
 		fmt.Println(wordwrap.String(explanation, 100))
 	}
 	if len(apod.Date) >= 10 {
-		page := fmt.Sprintf("https://apod.nasa.gov/apod/ap%s%s%s.html",
-			apod.Date[2:4], apod.Date[5:7], apod.Date[8:10])
+		page := apodPageURL(apod.Date)
 		fmt.Printf("- APOD page: %s\n", page)
 	}
 	fmt.Printf("- Saved to: %s\n", imagePath)

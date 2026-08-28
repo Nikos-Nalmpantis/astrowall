@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 func TestNewTUIModel_SelectsNewestRecord(t *testing.T) {
@@ -40,6 +41,47 @@ func TestTUIModelWindowResizeSetsReady(t *testing.T) {
 	}
 	if model.detail.Width() == 0 || model.detail.Height() == 0 {
 		t.Fatal("detail viewport not resized")
+	}
+}
+
+func TestTUIModelSizesFavoritesToItsContent(t *testing.T) {
+	recent := []APODRecord{{Date: "2024-09-27", Title: "Recent"}}
+	favorites := []APODRecord{{Date: "2024-08-01", Title: "Favorite", Favorite: true}}
+
+	m := newTUIModel(recent, favorites, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+
+	if got, want := m.favoriteList.Height(), desiredListInnerHeight(len(favorites)); got != want {
+		t.Fatalf("favorite list height = %d, want %d", got, want)
+	}
+	if m.recentList.Height() <= m.favoriteList.Height() {
+		t.Fatalf("recent list height = %d, want greater than favorite height %d", m.recentList.Height(), m.favoriteList.Height())
+	}
+}
+
+func TestTUIModelFitsWindow(t *testing.T) {
+	recent := []APODRecord{{Date: "2024-09-27", Title: "Recent", Description: strings.Repeat("Description ", 30)}}
+	favorites := []APODRecord{{Date: "2024-08-01", Title: "Favorite", Favorite: true}}
+
+	for _, size := range []struct {
+		width  int
+		height int
+	}{{120, 40}, {80, 24}, {60, 20}} {
+		for _, showHelp := range []bool{false, true} {
+			m := newTUIModel(recent, favorites, "KEY")
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: size.width, Height: size.height})
+			m = updated.(tuiModel)
+			m.showHelp = showHelp
+			view := m.View().Content
+
+			if got := lipgloss.Width(view); got > size.width {
+				t.Errorf("%dx%d help=%t view width = %d", size.width, size.height, showHelp, got)
+			}
+			if got := lipgloss.Height(view); got > size.height {
+				t.Errorf("%dx%d help=%t view height = %d", size.width, size.height, showHelp, got)
+			}
+		}
 	}
 }
 
@@ -251,6 +293,152 @@ func TestTUIModelTabSwitchesPaneByKeyCode(t *testing.T) {
 	}
 	if m.recentList.Title != "Recent APODs • active" {
 		t.Fatalf("recentList.Title = %q, want Recent APODs • active", m.recentList.Title)
+	}
+}
+
+func TestTUIModelShowsSpinnerWhileLoading(t *testing.T) {
+	recent := []APODRecord{{Date: "2024-09-27", Title: "Recent", Description: "Recent item.", MediaType: "image", URL: "https://example.com/recent.jpg"}}
+
+	m := newTUIModel(recent, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	m.loading = true
+	m.status = "Setting wallpaper for Recent…"
+
+	updated, cmd := m.Update(m.spinner.Tick())
+	m = updated.(tuiModel)
+	if cmd == nil {
+		t.Fatal("spinner tick should schedule the next frame")
+	}
+	if !strings.Contains(m.View().Content, "Setting wallpaper for Recent…") {
+		t.Fatalf("view = %q, want loading status", m.View().Content)
+	}
+	if !strings.Contains(m.View().Content, m.spinner.View()) {
+		t.Fatalf("view = %q, want spinner frame", m.View().Content)
+	}
+
+	updated, _ = m.Update(wallpaperAppliedMsg{date: "2024-09-27", title: "Recent", path: "/tmp/recent.jpg"})
+	m = updated.(tuiModel)
+	if m.loading {
+		t.Fatal("loading = true, want false after wallpaperAppliedMsg")
+	}
+}
+
+func TestTUIModelOpensApodPageURL(t *testing.T) {
+	recent := []APODRecord{{Date: "2024-09-27", Title: "Recent", Description: "Recent item.", MediaType: "image", URL: "https://example.com/recent.jpg"}}
+	m := newTUIModel(recent, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+
+	var opened string
+	oldOpen := openURLFunc
+	defer func() { openURLFunc = oldOpen }()
+	openURLFunc = func(url string) error {
+		opened = url
+		return nil
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "o", Code: 'o'})
+	m = updated.(tuiModel)
+	if cmd == nil {
+		t.Fatal("open page should return a command")
+	}
+	msg := cmd().(urlOpenedMsg)
+	updated, _ = m.Update(msg)
+	m = updated.(tuiModel)
+
+	if opened != apodPageURL("2024-09-27") {
+		t.Fatalf("opened URL = %q", opened)
+	}
+	if !strings.Contains(m.status, "Opened APOD page") {
+		t.Fatalf("status = %q", m.status)
+	}
+}
+
+func TestTUIModelOpensMediaURL(t *testing.T) {
+	recent := []APODRecord{{Date: "2024-09-27", Title: "Recent", Description: "Recent item.", MediaType: "image", URL: "https://example.com/recent.jpg", HDURL: "https://example.com/hd.jpg"}}
+	m := newTUIModel(recent, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+
+	var opened string
+	oldOpen := openURLFunc
+	defer func() { openURLFunc = oldOpen }()
+	openURLFunc = func(url string) error {
+		opened = url
+		return nil
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "u", Code: 'u'})
+	m = updated.(tuiModel)
+	if cmd == nil {
+		t.Fatal("open media should return a command")
+	}
+	msg := cmd().(urlOpenedMsg)
+	updated, _ = m.Update(msg)
+	m = updated.(tuiModel)
+
+	if opened != "https://example.com/hd.jpg" {
+		t.Fatalf("opened URL = %q, want HD URL", opened)
+	}
+	if !strings.Contains(m.status, "Opened media URL") {
+		t.Fatalf("status = %q", m.status)
+	}
+}
+
+func TestTUIModelTogglesHelpView(t *testing.T) {
+	recent := []APODRecord{{Date: "2024-09-27", Title: "Recent", Description: "Recent item.", MediaType: "image", URL: "https://example.com/recent.jpg"}}
+
+	m := newTUIModel(recent, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "?"})
+	m = updated.(tuiModel)
+	if !m.showHelp {
+		t.Fatal("showHelp = false, want true")
+	}
+	view := m.View().Content
+	if !strings.Contains(view, "Keybindings") {
+		t.Fatalf("view = %q, want help title", view)
+	}
+	if !strings.Contains(view, "Tab                Switch to the next pane") {
+		t.Fatalf("view = %q, want tab binding text", view)
+	}
+
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "?"})
+	m = updated.(tuiModel)
+	if m.showHelp {
+		t.Fatal("showHelp = true, want false after toggle")
+	}
+}
+
+func TestTUIModelEscClosesHelpView(t *testing.T) {
+	recent := []APODRecord{{Date: "2024-09-27", Title: "Recent", Description: "Recent item.", MediaType: "image", URL: "https://example.com/recent.jpg"}}
+
+	m := newTUIModel(recent, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	m.showHelp = true
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = updated.(tuiModel)
+	if m.showHelp {
+		t.Fatal("showHelp = true, want false after Esc")
+	}
+}
+
+func TestTUIModelSlashAlsoTogglesHelpView(t *testing.T) {
+	recent := []APODRecord{{Date: "2024-09-27", Title: "Recent", Description: "Recent item.", MediaType: "image", URL: "https://example.com/recent.jpg"}}
+
+	m := newTUIModel(recent, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "/", Code: '/'})
+	m = updated.(tuiModel)
+	if !m.showHelp {
+		t.Fatal("showHelp = false, want true after slash toggle")
 	}
 }
 

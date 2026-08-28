@@ -164,6 +164,28 @@ func resolveImagePath(output string) (string, error) {
 	return filepath.Join(picturesDir, "apod_wallpaper.jpg"), nil
 }
 
+func apodPageURL(date string) string {
+	if len(date) < 10 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"https://apod.nasa.gov/apod/ap%s%s%s.html",
+		date[2:4],
+		date[5:7],
+		date[8:10],
+	)
+}
+
+func preferredMediaURL(record APODRecord) string {
+	if record.MediaType == "image" && record.HDURL != "" {
+		return record.HDURL
+	}
+	if record.URL != "" {
+		return record.URL
+	}
+	return record.HDURL
+}
+
 func preferredPreviewURL(apod APODResponse) string {
 	if apod.MediaType == "image" && apod.URL != "" {
 		return apod.URL
