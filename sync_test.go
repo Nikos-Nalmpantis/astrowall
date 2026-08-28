@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -322,5 +323,62 @@ func TestSyncAPODArchive_PersistsMetadataAndPreviews(t *testing.T) {
 	}
 	if apodCalls != 1 {
 		t.Fatalf("APOD API calls = %d, want 1", apodCalls)
+	}
+}
+
+func TestSyncAPODItemCancelledDownloadLeavesNoRecordOrPreview(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	paths, err := resolveAppPaths()
+	if err != nil {
+		t.Fatalf("resolveAppPaths() error: %v", err)
+	}
+	db, err := openLibrary(paths.DBPath)
+	if err != nil {
+		t.Fatalf("openLibrary() error: %v", err)
+	}
+	defer db.Close()
+
+	requestStarted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("partial"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(requestStarted)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := syncAPODItemContext(ctx, db, paths, APODResponse{
+			Date:      "2024-09-27",
+			Title:     "Cancelled",
+			MediaType: "image",
+			URL:       server.URL + "/preview.jpg",
+		}, time.Now())
+		done <- err
+	}()
+	<-requestStarted
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("syncAPODItemContext() error = nil after cancellation")
+	}
+
+	if count, err := apodCount(db); err != nil {
+		t.Fatalf("apodCount() error: %v", err)
+	} else if count != 0 {
+		t.Fatalf("apodCount() = %d, want 0", count)
+	}
+	entries, err := os.ReadDir(paths.PreviewDir)
+	if err != nil {
+		t.Fatalf("ReadDir() error: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("preview directory contains %d files after cancellation", len(entries))
 	}
 }

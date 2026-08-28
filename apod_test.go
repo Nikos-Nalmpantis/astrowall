@@ -211,6 +211,29 @@ func TestDownloadImage_ServerError(t *testing.T) {
 	}
 }
 
+func TestDownloadImageReplacesExistingFile(t *testing.T) {
+	content := []byte("replacement image data")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(content)
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "existing.jpg")
+	if err := os.WriteFile(path, []byte("old image data"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := downloadImage(server.URL, path); err != nil {
+		t.Fatalf("downloadImage() error: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error: %v", err)
+	}
+	if string(data) != string(content) {
+		t.Fatalf("downloaded data = %q, want %q", data, content)
+	}
+}
+
 func TestPrintDetails(t *testing.T) {
 	// Smoke test: printDetails should not panic.
 	apod := APODResponse{

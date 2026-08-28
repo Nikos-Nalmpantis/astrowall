@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,7 +22,11 @@ const userAgent = "astrowall/1.0"
 var apodAPIBaseURL = "https://api.nasa.gov/planetary/apod"
 
 func httpGet(url string) (*http.Response, error) {
-	req, err := http.NewRequest("GET", url, nil)
+	return httpGetContext(context.Background(), url)
+}
+
+func httpGetContext(ctx context.Context, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +97,11 @@ func fetchAPOD(url string) (APODResponse, error) {
 }
 
 func fetchAPODRange(url string) ([]APODResponse, error) {
-	resp, err := httpGet(url)
+	return fetchAPODRangeContext(context.Background(), url)
+}
+
+func fetchAPODRangeContext(ctx context.Context, url string) ([]APODResponse, error) {
+	resp, err := httpGetContext(ctx, url)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -120,7 +129,11 @@ func fetchAPODRange(url string) ([]APODResponse, error) {
 }
 
 func downloadImage(url, path string) error {
-	resp, err := httpGet(url)
+	return downloadImageContext(context.Background(), url, path)
+}
+
+func downloadImageContext(ctx context.Context, url, targetPath string) error {
+	resp, err := httpGetContext(ctx, url)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -130,14 +143,35 @@ func downloadImage(url, path string) error {
 		return fmt.Errorf("server returned %d", resp.StatusCode)
 	}
 
-	file, err := os.Create(path)
+	file, err := os.Create(targetPath)
 	if err != nil {
 		return fmt.Errorf("creating file: %w", err)
 	}
-	defer file.Close()
 
 	if _, err := io.Copy(file, resp.Body); err != nil {
+		file.Close()
 		return fmt.Errorf("saving image: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("closing image: %w", err)
+	}
+	return nil
+}
+
+func downloadImageAtomicContext(ctx context.Context, url, targetPath string) error {
+	temp, err := os.CreateTemp(filepath.Dir(targetPath), ".astrowall-download-*")
+	if err != nil {
+		return fmt.Errorf("creating temporary image: %w", err)
+	}
+	tempPath := temp.Name()
+	temp.Close()
+	defer os.Remove(tempPath)
+
+	if err := downloadImageContext(ctx, url, tempPath); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, targetPath); err != nil {
+		return fmt.Errorf("installing image: %w", err)
 	}
 	return nil
 }

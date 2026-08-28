@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,6 +120,179 @@ func TestRunTUIModelUsesRecentRecords(t *testing.T) {
 	model = updated.(tuiModel)
 	if got := model.selectedRecord().Title; got != "Stored" {
 		t.Fatalf("selected title = %q, want Stored", got)
+	}
+}
+
+func TestNewTUIModelFromLibraryStartsWithCachedRecords(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	paths, err := resolveAppPaths()
+	if err != nil {
+		t.Fatalf("resolveAppPaths() error: %v", err)
+	}
+	db, err := openLibrary(paths.DBPath)
+	if err != nil {
+		t.Fatalf("openLibrary() error: %v", err)
+	}
+	defer db.Close()
+	if err := upsertAPOD(db, APODRecord{
+		Date:        "2024-09-26",
+		Title:       "Cached",
+		Description: "Available before sync.",
+		MediaType:   "image",
+		URL:         "https://example.com/cached.jpg",
+		FetchedAt:   time.Date(2024, 9, 26, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("upsertAPOD() error: %v", err)
+	}
+
+	model, err := newTUIModelFromLibrary(db, paths, "KEY", time.Date(2024, 9, 27, 9, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("newTUIModelFromLibrary() error: %v", err)
+	}
+	if got := model.selectedRecord().Title; got != "Cached" {
+		t.Fatalf("selected title = %q, want Cached", got)
+	}
+	if !model.syncing {
+		t.Fatal("syncing = false, want background sync pending")
+	}
+	if model.Init() == nil {
+		t.Fatal("Init() command = nil, want background sync command")
+	}
+}
+
+func TestTUIModelAddsBackgroundSyncItemsIncrementally(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	paths, err := resolveAppPaths()
+	if err != nil {
+		t.Fatalf("resolveAppPaths() error: %v", err)
+	}
+	db, err := openLibrary(paths.DBPath)
+	if err != nil {
+		t.Fatalf("openLibrary() error: %v", err)
+	}
+	defer db.Close()
+
+	now := time.Date(2024, 9, 27, 9, 0, 0, 0, time.UTC)
+	model, err := newTUIModelFromLibrary(db, paths, "KEY", now)
+	if err != nil {
+		t.Fatalf("newTUIModelFromLibrary() error: %v", err)
+	}
+	items := []APODResponse{
+		{Date: "2024-09-26", Title: "First", MediaType: "video"},
+		{Date: "2024-09-27", Title: "Second", MediaType: "video"},
+	}
+
+	updated, cmd := model.Update(archiveSyncPreparedMsg{plan: archiveSyncPlan{Items: items}})
+	model = updated.(tuiModel)
+	if cmd == nil {
+		t.Fatal("first item command = nil")
+	}
+	updated, cmd = model.Update(cmd())
+	model = updated.(tuiModel)
+	if len(model.recentRecords) != 1 || model.recentRecords[0].Title != "First" {
+		t.Fatalf("recent records after first item = %#v", model.recentRecords)
+	}
+	if cmd == nil {
+		t.Fatal("second item command = nil")
+	}
+	updated, cmd = model.Update(cmd())
+	model = updated.(tuiModel)
+	if cmd != nil {
+		t.Fatal("final item command is not nil")
+	}
+	if model.syncing {
+		t.Fatal("syncing = true after final item")
+	}
+	if len(model.recentRecords) != 2 || model.recentRecords[0].Title != "Second" {
+		t.Fatalf("recent records after final item = %#v", model.recentRecords)
+	}
+	if !strings.Contains(model.status, "Synced 2 APODs") {
+		t.Fatalf("status = %q", model.status)
+	}
+}
+
+func TestTUIModelStopsBackgroundSyncAfterItemFailure(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+	paths, err := resolveAppPaths()
+	if err != nil {
+		t.Fatalf("resolveAppPaths() error: %v", err)
+	}
+	db, err := openLibrary(paths.DBPath)
+	if err != nil {
+		t.Fatalf("openLibrary() error: %v", err)
+	}
+	defer db.Close()
+
+	m := newTUIModel(nil, nil, "KEY")
+	m.db = db
+	m.paths = paths
+	m.syncContext, m.cancelSync = context.WithCancel(context.Background())
+	m.commands = &commandTracker{}
+	m.syncing = true
+	m.syncItems = []APODResponse{{Date: "2024-09-26"}, {Date: "2024-09-27"}}
+	m.syncTotal = len(m.syncItems)
+
+	updated, cmd := m.Update(archiveItemSyncedMsg{date: "2024-09-26", err: os.ErrPermission})
+	m = updated.(tuiModel)
+	if cmd != nil {
+		t.Fatal("next item command is not nil after item failure")
+	}
+	if m.syncing {
+		t.Fatal("syncing = true after item failure")
+	}
+	if !strings.Contains(m.status, "Library sync failed for 2024-09-26") {
+		t.Fatalf("status = %q", m.status)
+	}
+}
+
+func TestTUIModelReportsEmptyBackgroundSync(t *testing.T) {
+	m := newTUIModel(nil, nil, "KEY")
+	m.syncing = true
+
+	updated, cmd := m.Update(archiveSyncPreparedMsg{plan: archiveSyncPlan{StartDate: "2024-09-27", EndDate: "2024-09-27"}})
+	m = updated.(tuiModel)
+	if cmd != nil {
+		t.Fatal("command is not nil for empty sync response")
+	}
+	if m.syncing {
+		t.Fatal("syncing = true after empty sync response")
+	}
+	if m.status != "Library sync returned no APODs" {
+		t.Fatalf("status = %q", m.status)
+	}
+}
+
+func TestTUIModelTracksSideEffectCommands(t *testing.T) {
+	m := newTUIModel(nil, nil, "KEY")
+	m.commands = &commandTracker{}
+	finished := false
+
+	cmd := m.trackCmd(func() tea.Msg {
+		finished = true
+		return nil
+	})
+	cmd()
+	m.commands.closeAndWait()
+	if !finished {
+		t.Fatal("tracked command did not run")
+	}
+}
+
+func TestCommandTrackerRejectsCommandsAfterShutdown(t *testing.T) {
+	tracker := &commandTracker{}
+	tracker.closeAndWait()
+	runs := 0
+	msg := tracker.run(func() tea.Msg {
+		runs++
+		return nil
+	})
+	if msg != nil || runs != 0 {
+		t.Fatalf("late command returned %v and ran %d times", msg, runs)
 	}
 }
 

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/spinner"
@@ -55,6 +58,17 @@ type urlOpenedMsg struct {
 	err    error
 }
 
+type archiveSyncPreparedMsg struct {
+	plan archiveSyncPlan
+	err  error
+}
+
+type archiveItemSyncedMsg struct {
+	date      string
+	previewed bool
+	err       error
+}
+
 type activePane int
 
 const (
@@ -77,6 +91,15 @@ type tuiModel struct {
 	ready           bool
 	loading         bool
 	showHelp        bool
+	syncing         bool
+	syncItems       []APODResponse
+	syncTotal       int
+	syncCompleted   int
+	syncPreviewed   int
+	syncNow         time.Time
+	syncContext     context.Context
+	cancelSync      context.CancelFunc
+	commands        *commandTracker
 	activePane      activePane
 	spinner         spinner.Model
 	listStyle       lipgloss.Style
@@ -89,6 +112,31 @@ type tuiModel struct {
 type imageArea struct {
 	width  int
 	height int
+}
+
+type commandTracker struct {
+	mu     sync.Mutex
+	closed bool
+	wait   sync.WaitGroup
+}
+
+func (t *commandTracker) run(cmd tea.Cmd) tea.Msg {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return nil
+	}
+	t.wait.Add(1)
+	t.mu.Unlock()
+	defer t.wait.Done()
+	return cmd()
+}
+
+func (t *commandTracker) closeAndWait() {
+	t.mu.Lock()
+	t.closed = true
+	t.mu.Unlock()
+	t.wait.Wait()
 }
 
 const (
@@ -149,7 +197,10 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 }
 
 func (m tuiModel) Init() tea.Cmd {
-	return nil
+	if m.db == nil {
+		return nil
+	}
+	return tea.Batch(m.prepareArchiveSyncCmd(), spinnerTickCmd(m.spinner))
 }
 
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -162,7 +213,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
-		if !m.loading {
+		if !m.loading && !m.syncing {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -180,6 +231,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showHelp = false
 				return m, nil
 			case msg.String() == "q", msg.String() == "ctrl+c":
+				m.cancelBackgroundSync()
 				return m, tea.Quit
 			default:
 				return m, nil
@@ -201,6 +253,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "q", "ctrl+c":
+			m.cancelBackgroundSync()
 			return m, tea.Quit
 		case "f":
 			if m.loading {
@@ -211,7 +264,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.status = fmt.Sprintf("Toggling favorite for %s…", record.Title)
-			return m, toggleFavoriteCmd(m.db, record.Date)
+			return m, m.trackCmd(toggleFavoriteCmd(m.db, record.Date))
 		case "o":
 			record := m.selectedRecord()
 			if record.Date == "" {
@@ -223,7 +276,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.status = fmt.Sprintf("Opening APOD page for %s…", record.Title)
-			return m, openURLCmd("APOD page", url)
+			return m, m.trackCmd(openURLCmd("APOD page", url))
 		case "u":
 			record := m.selectedRecord()
 			if record.Date == "" {
@@ -235,7 +288,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.status = fmt.Sprintf("Opening media URL for %s…", record.Title)
-			return m, openURLCmd("media URL", url)
+			return m, m.trackCmd(openURLCmd("media URL", url))
 		case "enter":
 			if m.loading {
 				return m, nil
@@ -246,7 +299,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.loading = true
 			m.status = fmt.Sprintf("Setting wallpaper for %s…", record.Title)
-			return m, tea.Batch(applyWallpaperCmd(m.db, m.paths, record, m.apiKey), spinnerTickCmd(m.spinner))
+			return m, tea.Batch(m.trackCmd(applyWallpaperCmd(m.db, m.paths, record, m.apiKey)), spinnerTickCmd(m.spinner))
 		}
 
 	case wallpaperAppliedMsg:
@@ -268,6 +321,53 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status = fmt.Sprintf("Opened %s", msg.target)
 		return m, nil
+
+	case archiveSyncPreparedMsg:
+		if msg.err != nil {
+			m.syncing = false
+			m.status = fmt.Sprintf("Library sync failed: %v", msg.err)
+			return m, nil
+		}
+		if msg.plan.AlreadyUpToDate {
+			m.syncing = false
+			m.status = "Local APOD library is up to date"
+			return m, nil
+		}
+		if len(msg.plan.Items) == 0 {
+			m.syncing = false
+			m.status = "Library sync returned no APODs"
+			return m, nil
+		}
+		m.syncItems = msg.plan.Items
+		m.syncTotal = len(msg.plan.Items)
+		m.status = fmt.Sprintf("Syncing APOD 1/%d…", m.syncTotal)
+		return m, m.syncArchiveItemCmd(m.syncItems[0])
+
+	case archiveItemSyncedMsg:
+		if msg.err != nil {
+			m.syncing = false
+			m.syncItems = nil
+			m.status = fmt.Sprintf("Library sync failed for %s: %v", msg.date, msg.err)
+			return m, nil
+		}
+		m.syncCompleted++
+		if msg.previewed {
+			m.syncPreviewed++
+		}
+		if err := m.reloadRecords(); err != nil {
+			m.syncing = false
+			m.syncItems = nil
+			m.status = fmt.Sprintf("Library refresh failed: %v", err)
+			return m, nil
+		}
+		m.syncItems = m.syncItems[1:]
+		if len(m.syncItems) == 0 {
+			m.syncing = false
+			m.status = fmt.Sprintf("Synced %d APODs and cached %d previews", m.syncCompleted, m.syncPreviewed)
+			return m, nil
+		}
+		m.status = fmt.Sprintf("Syncing APOD %d/%d…", m.syncCompleted+1, m.syncTotal)
+		return m, m.syncArchiveItemCmd(m.syncItems[0])
 
 	case favoriteToggledMsg:
 		if msg.err != nil {
@@ -336,7 +436,7 @@ func (m tuiModel) View() tea.View {
 	)
 
 	status := m.status
-	if m.loading {
+	if m.loading || m.syncing {
 		status = fmt.Sprintf("%s %s", m.spinner.View(), status)
 	}
 	if m.showHelp {
@@ -442,26 +542,111 @@ func (m tuiModel) selectedRecord() APODRecord {
 	return selected.record
 }
 
-func runTUI(db *sql.DB, apiKey string) error {
-	recentRecords, err := listRecentAPODs(db, 30)
+func runTUI(db *sql.DB, paths AppPaths, apiKey string) error {
+	model, err := newTUIModelFromLibrary(db, paths, apiKey, time.Now())
 	if err != nil {
 		return err
+	}
+	program := tea.NewProgram(model)
+	_, err = program.Run()
+	model.cancelBackgroundSync()
+	model.commands.closeAndWait()
+	return err
+}
+
+func newTUIModelFromLibrary(db *sql.DB, paths AppPaths, apiKey string, now time.Time) (tuiModel, error) {
+	recentRecords, err := listRecentAPODs(db, 30)
+	if err != nil {
+		return tuiModel{}, err
 	}
 	favoriteRecords, err := listFavoriteAPODs(db)
 	if err != nil {
-		return err
+		return tuiModel{}, err
 	}
-	paths, err := resolveAppPaths()
-	if err != nil {
-		return err
-	}
-
 	model := newTUIModel(recentRecords, favoriteRecords, apiKey)
 	model.db = db
 	model.paths = paths
-	program := tea.NewProgram(model)
-	_, err = program.Run()
-	return err
+	model.syncing = true
+	model.syncNow = now
+	model.syncContext, model.cancelSync = context.WithCancel(context.Background())
+	model.commands = &commandTracker{}
+	model.status = "Checking for new APODs…"
+	return model, nil
+}
+
+func (m tuiModel) prepareArchiveSyncCmd() tea.Cmd {
+	return m.trackCmd(func() tea.Msg {
+		plan, err := prepareArchiveSyncContext(m.syncContext, m.db, m.apiKey, m.syncNow)
+		return archiveSyncPreparedMsg{plan: plan, err: err}
+	})
+}
+
+func (m tuiModel) syncArchiveItemCmd(item APODResponse) tea.Cmd {
+	return m.trackCmd(func() tea.Msg {
+		previewed, err := syncAPODItemContext(m.syncContext, m.db, m.paths, item, m.syncNow)
+		return archiveItemSyncedMsg{date: item.Date, previewed: previewed, err: err}
+	})
+}
+
+func (m tuiModel) trackCmd(cmd tea.Cmd) tea.Cmd {
+	if cmd == nil || m.commands == nil {
+		return cmd
+	}
+	return func() tea.Msg {
+		return m.commands.run(cmd)
+	}
+}
+
+func (m tuiModel) cancelBackgroundSync() {
+	if m.cancelSync != nil {
+		m.cancelSync()
+	}
+}
+
+func (m *tuiModel) reloadRecords() error {
+	recentDate := selectedListDate(m.recentList)
+	favoriteDate := selectedListDate(m.favoriteList)
+
+	recent, err := listRecentAPODs(m.db, 30)
+	if err != nil {
+		return err
+	}
+	favorites, err := listFavoriteAPODs(m.db)
+	if err != nil {
+		return err
+	}
+	m.recentRecords = recent
+	m.favoriteRecords = favorites
+	m.syncListItems()
+	selectListDate(&m.recentList, recentDate)
+	selectListDate(&m.favoriteList, favoriteDate)
+	if m.ready {
+		m.resize()
+	} else {
+		m.refreshDetail(false)
+	}
+	return nil
+}
+
+func selectedListDate(listModel list.Model) string {
+	item, ok := listModel.SelectedItem().(apodListItem)
+	if !ok {
+		return ""
+	}
+	return item.record.Date
+}
+
+func selectListDate(listModel *list.Model, date string) {
+	if date == "" {
+		return
+	}
+	for i, item := range listModel.Items() {
+		record, ok := item.(apodListItem)
+		if ok && record.record.Date == date {
+			listModel.Select(i)
+			return
+		}
+	}
 }
 
 func (m *tuiModel) syncListItems() {

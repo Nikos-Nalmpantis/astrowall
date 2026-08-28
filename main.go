@@ -75,6 +75,14 @@ func main() {
 	}
 	defer db.Close()
 
+	if tuiMode {
+		if err := runTUI(db, paths, key); err != nil {
+			fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	result, err := runStartupSync(db, paths, key, time.Now(), syncOnly, os.Stderr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error syncing APOD library: %v\n", err)
@@ -93,14 +101,6 @@ func main() {
 		printFavoriteCycleSummary(os.Stdout, result)
 		return
 	}
-	if tuiMode {
-		if err := runTUI(db, key); err != nil {
-			fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
 	imagePath, err := resolveImagePath(output)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error resolving output path: %v\n", err)
