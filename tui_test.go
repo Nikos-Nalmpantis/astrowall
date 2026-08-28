@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestNewTUIModel_SelectsNewestRecord(t *testing.T) {
@@ -45,19 +47,40 @@ func TestTUIModelWindowResizeSetsReady(t *testing.T) {
 	}
 }
 
-func TestTUIModelSizesFavoritesToItsContent(t *testing.T) {
+func TestTUIModelKeepsListPaneHeightsIndependentOfContent(t *testing.T) {
 	recent := []APODRecord{{Date: "2024-09-27", Title: "Recent"}}
-	favorites := []APODRecord{{Date: "2024-08-01", Title: "Favorite", Favorite: true}}
-
-	m := newTUIModel(recent, favorites, "KEY")
+	m := newTUIModel(recent, nil, "KEY")
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = updated.(tuiModel)
+	recentHeight := m.recentList.Height()
+	favoriteHeight := m.favoriteList.Height()
+	recentRenderedWidth := lipgloss.Width(m.renderListPane(recentPane, m.recentList))
+	favoriteRenderedWidth := lipgloss.Width(m.renderListPane(favoritesPane, m.favoriteList))
 
-	if got, want := m.favoriteList.Height(), desiredListInnerHeight(len(favorites)); got != want {
-		t.Fatalf("favorite list height = %d, want %d", got, want)
+	m.favoriteRecords = make([]APODRecord, 20)
+	for i := range m.favoriteRecords {
+		m.favoriteRecords[i] = APODRecord{Date: fmt.Sprintf("2024-08-%02d", i+1), Title: strings.Repeat("Favorite ", i+1), Favorite: true}
 	}
-	if m.recentList.Height() <= m.favoriteList.Height() {
-		t.Fatalf("recent list height = %d, want greater than favorite height %d", m.recentList.Height(), m.favoriteList.Height())
+	m.syncListItems()
+	m.resize()
+
+	if m.recentList.Height() != recentHeight {
+		t.Fatalf("recent height changed from %d to %d after adding favorites", recentHeight, m.recentList.Height())
+	}
+	if m.favoriteList.Height() != favoriteHeight {
+		t.Fatalf("favorite height changed from %d to %d after adding favorites", favoriteHeight, m.favoriteList.Height())
+	}
+	if got := lipgloss.Width(m.renderListPane(recentPane, m.recentList)); got != recentRenderedWidth {
+		t.Fatalf("rendered recent width changed from %d to %d after adding favorites", recentRenderedWidth, got)
+	}
+	if got := lipgloss.Width(m.renderListPane(favoritesPane, m.favoriteList)); got != favoriteRenderedWidth {
+		t.Fatalf("rendered favorite width changed from %d to %d after adding favorites", favoriteRenderedWidth, got)
+	}
+	if difference := m.recentList.Height() - m.favoriteList.Height(); difference < 0 || difference > 1 {
+		t.Fatalf("list pane height difference = %d, want 0 or 1", difference)
+	}
+	if m.favoriteList.Paginator.TotalPages <= 1 {
+		t.Fatalf("favorite pages = %d, want pagination", m.favoriteList.Paginator.TotalPages)
 	}
 }
 
@@ -82,6 +105,84 @@ func TestTUIModelFitsWindow(t *testing.T) {
 			if got := lipgloss.Height(view); got > size.height {
 				t.Errorf("%dx%d help=%t view height = %d", size.width, size.height, showHelp, got)
 			}
+		}
+	}
+}
+
+func TestTUIModelUsesFixedPaneGapsAcrossResizes(t *testing.T) {
+	recent := []APODRecord{{Date: "2024-09-27", Title: "Recent"}}
+	favorites := []APODRecord{{Date: "2024-08-01", Title: "Favorite", Favorite: true}}
+	m := newTUIModel(recent, favorites, "KEY")
+
+	for _, size := range []tea.WindowSizeMsg{{Width: 80, Height: 24}, {Width: 120, Height: 40}} {
+		updated, _ := m.Update(size)
+		m = updated.(tuiModel)
+
+		listHorizontalFrame, listVerticalFrame := m.listStyle.GetFrameSize()
+		detailHorizontalFrame, _ := m.detailStyle.GetFrameSize()
+		leftWidth := m.recentList.Width() + listHorizontalFrame + 1
+		rightWidth := m.detail.Width() + detailHorizontalFrame
+		if got := size.Width - leftWidth - rightWidth; got != horizontalPaneGap {
+			t.Fatalf("%dx%d horizontal gap = %d, want %d", size.Width, size.Height, got, horizontalPaneGap)
+		}
+
+		contentHeight := size.Height - statusLineCount
+		listHeight := m.recentList.Height() + m.favoriteList.Height() + listVerticalFrame*2
+		if got := contentHeight - listHeight; got != verticalPaneGap {
+			t.Fatalf("%dx%d vertical gap = %d, want %d", size.Width, size.Height, got, verticalPaneGap)
+		}
+
+		leftColumn := lipgloss.JoinVertical(
+			lipgloss.Left,
+			m.renderListPane(recentPane, m.recentList),
+			m.renderListPane(favoritesPane, m.favoriteList),
+		)
+		lines := strings.Split(ansi.Strip(leftColumn), "\n")
+		recentHeight := lipgloss.Height(m.renderListPane(recentPane, m.recentList))
+		if !strings.HasPrefix(lines[recentHeight], "╭") {
+			t.Fatalf("%dx%d favorites did not start immediately after recent pane: %q", size.Width, size.Height, lines[recentHeight])
+		}
+	}
+}
+
+func TestTUIModelPaneSizesRespondToWindowResize(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Date: "2024-09-27", Title: "Recent"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	smallListWidth := m.recentList.Width()
+	smallDetailWidth := m.detail.Width()
+	smallRecentHeight := m.recentList.Height()
+
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	if m.recentList.Width() <= smallListWidth {
+		t.Fatalf("list width did not grow: %d to %d", smallListWidth, m.recentList.Width())
+	}
+	if m.detail.Width() <= smallDetailWidth {
+		t.Fatalf("detail width did not grow: %d to %d", smallDetailWidth, m.detail.Width())
+	}
+	if m.recentList.Height() <= smallRecentHeight {
+		t.Fatalf("recent height did not grow: %d to %d", smallRecentHeight, m.recentList.Height())
+	}
+}
+
+func TestTUIModelListPanesRenderBottomBorders(t *testing.T) {
+	recent := make([]APODRecord, 20)
+	for i := range recent {
+		recent[i] = APODRecord{Date: fmt.Sprintf("2024-08-%02d", i+1), Title: "Recent"}
+	}
+	m := newTUIModel(recent, recent, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+
+	for name, pane := range map[string]string{
+		"recent":    m.renderListPane(recentPane, m.recentList),
+		"favorites": m.renderListPane(favoritesPane, m.favoriteList),
+	} {
+		lines := strings.Split(pane, "\n")
+		bottom := ansi.Strip(lines[len(lines)-1])
+		if !strings.HasPrefix(bottom, "╰") || !strings.HasSuffix(bottom, "╯") {
+			t.Fatalf("%s bottom border = %q", name, bottom)
 		}
 	}
 }

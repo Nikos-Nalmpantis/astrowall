@@ -141,11 +141,9 @@ func (t *commandTracker) closeAndWait() {
 
 const (
 	statusLineCount       = 2
+	horizontalPaneGap     = 1
+	verticalPaneGap       = 0
 	detailHeaderLineCount = 4
-	listTitleLineCount    = 2
-	listItemLineCount     = 2
-	minListInnerHeight    = 4
-	minRecentInnerHeight  = 8
 )
 
 func newListModel(title string, records []APODRecord) list.Model {
@@ -161,7 +159,7 @@ func newListModel(title string, records []APODRecord) list.Model {
 	listModel.Title = title
 	listModel.SetShowHelp(false)
 	listModel.SetShowStatusBar(false)
-	listModel.SetShowPagination(false)
+	listModel.SetShowPagination(true)
 	listModel.SetShowFilter(false)
 	listModel.SetFilteringEnabled(false)
 	listModel.DisableQuitKeybindings()
@@ -432,6 +430,7 @@ func (m tuiModel) View() tea.View {
 
 	panes := lipgloss.JoinHorizontal(lipgloss.Top,
 		leftColumn,
+		strings.Repeat(" ", horizontalPaneGap),
 		m.detailStyle.Render(detailView),
 	)
 
@@ -467,22 +466,20 @@ func (m *tuiModel) resize() {
 	detailHorizontalFrame, detailVerticalFrame := m.detailStyle.GetFrameSize()
 
 	contentHeight := max(1, m.height-statusLineCount)
-	leftOuterWidth := m.width / 3
+	availableWidth := max(2, m.width-horizontalPaneGap)
+	leftOuterWidth := availableWidth / 3
 	if m.width >= 40 {
 		leftOuterWidth = max(20, leftOuterWidth)
 	} else {
-		leftOuterWidth = m.width / 2
+		leftOuterWidth = availableWidth / 2
 	}
-	rightOuterWidth := max(1, m.width-leftOuterWidth)
+	rightOuterWidth := max(1, availableWidth-leftOuterWidth)
 	// The list view reserves one cursor column beyond its configured width.
 	listInnerWidth := max(1, leftOuterWidth-listHorizontalFrame-1)
 	detailInnerWidth := max(1, rightOuterWidth-detailHorizontalFrame)
-	leftInnerHeight := max(2, contentHeight-listVerticalFrame*2)
-	favoriteDesiredHeight := desiredListInnerHeight(len(m.favoriteRecords))
-	recentReservedHeight := min(minRecentInnerHeight, leftInnerHeight-1)
-	maxFavoriteHeight := max(1, leftInnerHeight-recentReservedHeight)
-	favoriteInnerHeight := min(favoriteDesiredHeight, maxFavoriteHeight)
-	recentInnerHeight := leftInnerHeight - favoriteInnerHeight
+	leftInnerHeight := max(2, contentHeight-listVerticalFrame*2-verticalPaneGap)
+	recentInnerHeight := (leftInnerHeight + 1) / 2
+	favoriteInnerHeight := leftInnerHeight / 2
 	detailInnerHeight := max(1, contentHeight-detailVerticalFrame)
 
 	m.recentList.SetSize(listInnerWidth, recentInnerHeight)
@@ -777,7 +774,35 @@ func (m tuiModel) renderListPane(pane activePane, listModel list.Model) string {
 	if m.activePane == pane {
 		style = style.BorderForeground(lipgloss.Color("39")).Bold(true)
 	}
-	return style.Render(listModel.View())
+	style = style.
+		Width(listModel.Width() + 1).
+		MaxWidth(listModel.Width() + 1)
+	_, verticalFrame := style.GetFrameSize()
+	rendered := style.Render(limitBlock(listModel.View(), listModel.Width()+1, listModel.Height()))
+	return limitRenderedPane(rendered, listModel.Height()+verticalFrame)
+}
+
+func limitBlock(content string, width, height int) string {
+	if height <= 0 {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for i := range lines {
+		lines[i] = ansi.Truncate(lines[i], width, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func limitRenderedPane(content string, height int) string {
+	lines := strings.Split(content, "\n")
+	if height <= 0 || len(lines) <= height {
+		return content
+	}
+	lines[height-1] = lines[len(lines)-1]
+	return strings.Join(lines[:height], "\n")
 }
 
 func (m *tuiModel) updatePaneTitles() {
@@ -861,10 +886,6 @@ func spinnerTickCmd(spin spinner.Model) tea.Cmd {
 	return func() tea.Msg {
 		return spin.Tick()
 	}
-}
-
-func desiredListInnerHeight(itemCount int) int {
-	return max(minListInnerHeight, listTitleLineCount+itemCount*listItemLineCount)
 }
 
 func (m tuiModel) renderHelpView() string {
