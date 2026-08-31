@@ -2,10 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -42,6 +45,38 @@ func TestBuildAPODURL(t *testing.T) {
 				t.Errorf("buildAPODURL() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFetchAPODErrorsDoNotExposeAPIKey(t *testing.T) {
+	secret := "SUPER_SECRET"
+	originalClient := httpClient
+	httpClient = &http.Client{Transport: credentialRoundTripper(func(request *http.Request) (*http.Response, error) {
+		return nil, errors.New(request.URL.String())
+	})}
+	t.Cleanup(func() { httpClient = originalClient })
+
+	_, err := fetchAPOD(buildAPODURL(secret, false, ""))
+	if err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("fetchAPOD() error = %v", err)
+	}
+}
+
+func TestFetchAPODRangeDoesNotExposeResponseBody(t *testing.T) {
+	secret := "SUPER_SECRET"
+	originalClient := httpClient
+	httpClient = &http.Client{Transport: credentialRoundTripper(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Body:       io.NopCloser(strings.NewReader("rejected " + secret)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	t.Cleanup(func() { httpClient = originalClient })
+
+	_, err := fetchAPODRange(buildAPODRangeURL(secret, "2024-09-26", "2024-09-27"))
+	if err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("fetchAPODRange() error = %v", err)
 	}
 }
 

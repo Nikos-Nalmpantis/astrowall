@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -124,6 +125,194 @@ func TestTUIModelScrollsDescriptionWithoutChangingSelection(t *testing.T) {
 	}
 	if got := m.selectedRecord().Date; got != "2024-09-27" {
 		t.Fatalf("selected date = %q after detail scroll", got)
+	}
+}
+
+func TestTUIModelOpensMaskedAPIKeyInput(t *testing.T) {
+	m := newTUIModel(nil, nil, "DEMO_KEY")
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "a", Code: 'a'})
+	m = updated.(tuiModel)
+	if !m.showAPIKeyInput || !m.apiKeyInput.Focused() || cmd == nil {
+		t.Fatalf("showAPIKeyInput = %t, focused = %t, cmd = %v", m.showAPIKeyInput, m.apiKeyInput.Focused(), cmd)
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "SECRET", Code: 'S'})
+	m = updated.(tuiModel)
+	view := m.renderAPIKeyInput()
+	if strings.Contains(view, "SECRET") || !strings.Contains(view, "••••••") {
+		t.Fatalf("API key input view = %q", view)
+	}
+}
+
+func TestTUIModelCancelsAPIKeyInput(t *testing.T) {
+	m := newTUIModel(nil, nil, "DEMO_KEY")
+	m.showAPIKeyInput = true
+	m.apiKeyInput.Focus()
+	m.apiKeyInput.SetValue("SECRET")
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = updated.(tuiModel)
+	if m.showAPIKeyInput || m.apiKeyInput.Value() != "" {
+		t.Fatalf("showAPIKeyInput = %t, value = %q", m.showAPIKeyInput, m.apiKeyInput.Value())
+	}
+}
+
+func TestTUIModelAPIKeyInputAcceptsLetterQ(t *testing.T) {
+	m := newTUIModel(nil, nil, "DEMO_KEY")
+	m.showAPIKeyInput = true
+	m.apiKeyInput.Focus()
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "q", Code: 'q'})
+	m = updated.(tuiModel)
+	if m.apiKeyInput.Value() != "q" {
+		t.Fatalf("command = %v, value = %q", cmd, m.apiKeyInput.Value())
+	}
+}
+
+func TestTUIModelCanQuitWhileSavingAPIKey(t *testing.T) {
+	m := newTUIModel(nil, nil, "DEMO_KEY")
+	m.showAPIKeyInput = true
+	m.savingAPIKey = true
+	_, cmd := m.Update(tea.KeyPressMsg{Text: "ctrl+c", Code: 'c', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("Ctrl+C command = nil while saving API key")
+	}
+}
+
+func TestTUIModelSavesAPIKeyFromInput(t *testing.T) {
+	withCredentialStubs(t)
+	validateKey = func(string) error { return nil }
+	keyringSet = func(service, account, key string) error { return nil }
+	m := newTUIModel(nil, nil, "DEMO_KEY")
+	m.showAPIKeyInput = true
+	m.apiKeyInput.Focus()
+	m.apiKeyInput.SetValue("SAVED_KEY")
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(tuiModel)
+	if !m.savingAPIKey || cmd == nil {
+		t.Fatalf("savingAPIKey = %t, cmd = %v", m.savingAPIKey, cmd)
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(tuiModel)
+	if m.showAPIKeyInput || m.apiKey != "SAVED_KEY" || m.apiKeySource != apiKeySourceCredential {
+		t.Fatalf("dialog = %t, key = %q, source = %q", m.showAPIKeyInput, m.apiKey, m.apiKeySource)
+	}
+}
+
+func TestTUIModelKeepsInputOpenAfterAPIKeyFailure(t *testing.T) {
+	m := newTUIModel(nil, nil, "DEMO_KEY")
+	m.showAPIKeyInput = true
+	m.savingAPIKey = true
+	m.apiKeyInput.SetValue("INVALID")
+	updated, _ := m.Update(apiKeySavedMsg{apiKey: "INVALID", err: errors.New("invalid key")})
+	m = updated.(tuiModel)
+	if !m.showAPIKeyInput || m.savingAPIKey || m.apiKey != "DEMO_KEY" {
+		t.Fatalf("dialog = %t, saving = %t, key = %q", m.showAPIKeyInput, m.savingAPIKey, m.apiKey)
+	}
+}
+
+func TestTUIModelSavingCredentialPreservesExplicitKey(t *testing.T) {
+	m := newTUIModel(nil, nil, "ENV_KEY")
+	m.apiKeySource = apiKeySourceEnv
+	m.showAPIKeyInput = true
+	updated, _ := m.Update(apiKeySavedMsg{apiKey: "SAVED_KEY"})
+	m = updated.(tuiModel)
+	if m.apiKey != "ENV_KEY" || m.apiKeySource != apiKeySourceEnv {
+		t.Fatalf("key = %q, source = %q", m.apiKey, m.apiKeySource)
+	}
+}
+
+func TestTUIModelRemovingCredentialPreservesExplicitKey(t *testing.T) {
+	m := newTUIModel(nil, nil, "FLAG_KEY")
+	m.apiKeySource = apiKeySourceFlag
+	m.showAPIKeyInput = true
+	updated, _ := m.Update(apiKeyRemovedMsg{})
+	m = updated.(tuiModel)
+	if m.apiKey != "FLAG_KEY" || m.apiKeySource != apiKeySourceFlag {
+		t.Fatalf("key = %q, source = %q", m.apiKey, m.apiKeySource)
+	}
+}
+
+func TestTUIModelLoadsSavedKeyBeforeStartingSync(t *testing.T) {
+	m := newTUIModel(nil, nil, "DEMO_KEY")
+	m.lookupCredential = true
+	m.apiKeySource = apiKeySourceDemo
+	updated, cmd := m.Update(savedAPIKeyLoadedMsg{apiKey: "SAVED_KEY"})
+	m = updated.(tuiModel)
+	if m.apiKey != "SAVED_KEY" || m.apiKeySource != apiKeySourceCredential || m.lookupCredential {
+		t.Fatalf("key = %q, source = %q, lookup = %t", m.apiKey, m.apiKeySource, m.lookupCredential)
+	}
+	if cmd == nil {
+		t.Fatal("archive sync command = nil after credential lookup")
+	}
+}
+
+func TestTUIModelUsesDemoAfterSavedKeyLookupFailure(t *testing.T) {
+	m := newTUIModel(nil, nil, "DEMO_KEY")
+	m.lookupCredential = true
+	updated, cmd := m.Update(savedAPIKeyLoadedMsg{err: errors.New("timed out")})
+	m = updated.(tuiModel)
+	if m.apiKey != "DEMO_KEY" || m.apiKeySource != apiKeySourceDemo || m.lookupCredential {
+		t.Fatalf("key = %q, source = %q, lookup = %t", m.apiKey, m.apiKeySource, m.lookupCredential)
+	}
+	if cmd == nil || !strings.Contains(m.status, "using DEMO_KEY") {
+		t.Fatalf("command = %v, status = %q", cmd, m.status)
+	}
+}
+
+func TestTUIModelIgnoresStaleSavedKeyLookupAfterRemoval(t *testing.T) {
+	m := newTUIModel(nil, nil, "SAVED_KEY")
+	m.apiKeySource = apiKeySourceCredential
+	m.lookupCredential = true
+	updated, _ := m.Update(apiKeyRemovedMsg{})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(savedAPIKeyLoadedMsg{apiKey: "STALE_KEY"})
+	m = updated.(tuiModel)
+	if m.apiKey != "DEMO_KEY" || m.apiKeySource != apiKeySourceDemo {
+		t.Fatalf("key = %q, source = %q", m.apiKey, m.apiKeySource)
+	}
+}
+
+func TestTUIModelIgnoresStaleSavedKeyLookupAfterSave(t *testing.T) {
+	m := newTUIModel(nil, nil, "DEMO_KEY")
+	m.lookupCredential = true
+	m.savingAPIKey = true
+	updated, _ := m.Update(apiKeySavedMsg{apiKey: "NEW_KEY"})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(savedAPIKeyLoadedMsg{apiKey: "STALE_KEY"})
+	m = updated.(tuiModel)
+	if m.apiKey != "NEW_KEY" || m.apiKeySource != apiKeySourceCredential {
+		t.Fatalf("key = %q, source = %q", m.apiKey, m.apiKeySource)
+	}
+}
+
+func TestTUIModelDefersStaleLookupUntilSaveCompletes(t *testing.T) {
+	m := newTUIModel(nil, nil, "DEMO_KEY")
+	m.lookupCredential = false
+	m.savingAPIKey = true
+	updated, cmd := m.Update(savedAPIKeyLoadedMsg{apiKey: "OLD_KEY"})
+	m = updated.(tuiModel)
+	if cmd != nil || m.syncStarted || !m.hasPendingKey {
+		t.Fatalf("command = %v, syncStarted = %t, pending = %t", cmd, m.syncStarted, m.hasPendingKey)
+	}
+	updated, _ = m.Update(apiKeySavedMsg{apiKey: "NEW_KEY"})
+	m = updated.(tuiModel)
+	if m.apiKey != "NEW_KEY" || m.hasPendingKey {
+		t.Fatalf("key = %q, pending = %t", m.apiKey, m.hasPendingKey)
+	}
+}
+
+func TestTUIModelUsesDeferredCredentialAfterSaveFailure(t *testing.T) {
+	m := newTUIModel(nil, nil, "DEMO_KEY")
+	m.lookupCredential = false
+	m.savingAPIKey = true
+	updated, _ := m.Update(savedAPIKeyLoadedMsg{apiKey: "OLD_KEY"})
+	m = updated.(tuiModel)
+	updated, cmd := m.Update(apiKeySavedMsg{apiKey: "NEW_KEY", err: errors.New("save failed")})
+	m = updated.(tuiModel)
+	if m.apiKey != "OLD_KEY" || m.apiKeySource != apiKeySourceCredential {
+		t.Fatalf("key = %q, source = %q", m.apiKey, m.apiKeySource)
+	}
+	if cmd == nil || !m.syncStarted {
+		t.Fatalf("command = %v, syncStarted = %t", cmd, m.syncStarted)
 	}
 }
 

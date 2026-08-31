@@ -13,6 +13,7 @@ import (
 
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -81,6 +82,20 @@ type nativeImageActivatedMsg struct {
 	key   string
 }
 
+type apiKeySavedMsg struct {
+	apiKey string
+	err    error
+}
+
+type apiKeyRemovedMsg struct {
+	err error
+}
+
+type savedAPIKeyLoadedMsg struct {
+	apiKey string
+	err    error
+}
+
 type activePane int
 
 const (
@@ -97,6 +112,14 @@ type tuiModel struct {
 	recentRecords    []APODRecord
 	favoriteRecords  []APODRecord
 	apiKey           string
+	apiKeySource     apiKeySource
+	apiKeyInput      textinput.Model
+	showAPIKeyInput  bool
+	savingAPIKey     bool
+	lookupCredential bool
+	syncStarted      bool
+	pendingSavedKey  savedAPIKeyLoadedMsg
+	hasPendingKey    bool
 	status           string
 	width            int
 	height           int
@@ -202,6 +225,12 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 	detail.SetContent("No APODs loaded.")
 	spin := spinner.New()
 	spin.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	keyInput := textinput.New()
+	keyInput.Prompt = "NASA API key: "
+	keyInput.Placeholder = "Paste your key"
+	keyInput.EchoMode = textinput.EchoPassword
+	keyInput.EchoCharacter = '•'
+	keyInput.CharLimit = 256
 
 	m := tuiModel{
 		recentList:      recentList,
@@ -210,6 +239,8 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 		recentRecords:   recentRecords,
 		favoriteRecords: favoriteRecords,
 		apiKey:          apiKey,
+		apiKeySource:    apiKeySourceDemo,
+		apiKeyInput:     keyInput,
 		status:          "j/k move • tab switch pane • d description • enter set wallpaper • f favorite • o page • u media • ? help • q quit",
 		activePane:      recentPane,
 		spinner:         spin,
@@ -227,6 +258,9 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 func (m tuiModel) Init() tea.Cmd {
 	if m.db == nil {
 		return nil
+	}
+	if m.lookupCredential {
+		return tea.Batch(loadSavedAPIKeyCmd(), spinnerTickCmd(m.spinner))
 	}
 	return tea.Batch(m.prepareArchiveSyncCmd(), spinnerTickCmd(m.spinner))
 }
@@ -249,6 +283,45 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyPressMsg:
+		if m.showAPIKeyInput {
+			switch msg.String() {
+			case "ctrl+c":
+				m.cancelBackgroundSync()
+				return m, tea.Sequence(m.clearNativeImage(), tea.Quit)
+			case "esc", "escape", "ctrl+[":
+				if m.savingAPIKey {
+					return m, nil
+				}
+				m.closeAPIKeyInput()
+				m.status = "NASA API key update cancelled"
+				return m, m.requestNativeImage()
+			case "enter":
+				if m.savingAPIKey {
+					return m, nil
+				}
+				apiKey := strings.TrimSpace(m.apiKeyInput.Value())
+				if apiKey == "" {
+					m.status = "NASA API key cannot be empty"
+					return m, nil
+				}
+				m.savingAPIKey = true
+				m.lookupCredential = false
+				m.status = "Validating and saving NASA API key…"
+				return m, saveAPIKeyCmd(apiKey)
+			case "ctrl+r":
+				if m.savingAPIKey {
+					return m, nil
+				}
+				m.savingAPIKey = true
+				m.lookupCredential = false
+				m.status = "Removing saved NASA API key…"
+				return m, removeAPIKeyCmd()
+			default:
+				var cmd tea.Cmd
+				m.apiKeyInput, cmd = m.apiKeyInput.Update(msg)
+				return m, cmd
+			}
+		}
 		if isHelpToggleKey(msg) {
 			m.showHelp = !m.showHelp
 			if m.showHelp {
@@ -291,6 +364,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			m.cancelBackgroundSync()
 			return m, tea.Sequence(m.clearNativeImage(), tea.Quit)
+		case "a":
+			m.showAPIKeyInput = true
+			m.apiKeyInput.Reset()
+			m.status = fmt.Sprintf("NASA API key source: %s", m.apiKeySource)
+			return m, tea.Batch(m.apiKeyInput.Focus(), m.clearNativeImage())
 		case "d":
 			if m.selectedRecord().PreviewPath == "" {
 				m.refreshDetail(true)
@@ -374,6 +452,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case archiveSyncPreparedMsg:
+		m.syncStarted = true
 		if msg.err != nil {
 			m.syncing = false
 			m.status = fmt.Sprintf("Library sync failed: %v", msg.err)
@@ -491,6 +570,66 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshDetail(false)
 		return m, nil
 
+	case apiKeySavedMsg:
+		m.savingAPIKey = false
+		m.lookupCredential = false
+		if msg.err != nil {
+			m.applyPendingSavedKey()
+			m.status = fmt.Sprintf("NASA API key was not saved: %v", msg.err)
+			return m, m.startArchiveSync()
+		}
+		m.hasPendingKey = false
+		if m.apiKeySource != apiKeySourceFlag && m.apiKeySource != apiKeySourceEnv {
+			m.apiKey = msg.apiKey
+			m.apiKeySource = apiKeySourceCredential
+		}
+		m.closeAPIKeyInput()
+		m.status = fmt.Sprintf("NASA API key validated and saved securely • current source: %s", m.apiKeySource)
+		return m, tea.Batch(m.startArchiveSync(), m.requestNativeImage())
+
+	case apiKeyRemovedMsg:
+		m.savingAPIKey = false
+		m.lookupCredential = false
+		if msg.err != nil {
+			m.applyPendingSavedKey()
+			m.status = fmt.Sprintf("Saved NASA API key was not removed: %v", msg.err)
+			return m, m.startArchiveSync()
+		}
+		m.hasPendingKey = false
+		if m.apiKeySource == apiKeySourceCredential {
+			m.apiKey = "DEMO_KEY"
+			m.apiKeySource = apiKeySourceDemo
+		}
+		m.closeAPIKeyInput()
+		m.status = fmt.Sprintf("Saved NASA API key removed • current source: %s", m.apiKeySource)
+		return m, tea.Batch(m.startArchiveSync(), m.requestNativeImage())
+
+	case savedAPIKeyLoadedMsg:
+		if !m.lookupCredential {
+			if m.savingAPIKey {
+				m.pendingSavedKey = msg
+				m.hasPendingKey = true
+				return m, nil
+			}
+			return m, m.startArchiveSync()
+		}
+		m.lookupCredential = false
+		if msg.err == nil && msg.apiKey != "" {
+			m.apiKey = msg.apiKey
+			m.apiKeySource = apiKeySourceCredential
+			m.status = "Saved NASA API key loaded • checking for new APODs…"
+		} else if msg.err != nil {
+			m.status = fmt.Sprintf("Saved key unavailable; using DEMO_KEY: %v", msg.err)
+		} else {
+			m.status = "Using DEMO_KEY • checking for new APODs…"
+		}
+		return m, m.startArchiveSync()
+
+	}
+	if m.showAPIKeyInput {
+		var cmd tea.Cmd
+		m.apiKeyInput, cmd = m.apiKeyInput.Update(msg)
+		return m, cmd
 	}
 
 	before := m.activeList().Index()
@@ -502,6 +641,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, listCmd
+}
+
+func (m *tuiModel) applyPendingSavedKey() {
+	if !m.hasPendingKey {
+		return
+	}
+	if m.pendingSavedKey.err == nil && m.pendingSavedKey.apiKey != "" && m.apiKeySource != apiKeySourceFlag && m.apiKeySource != apiKeySourceEnv {
+		m.apiKey = m.pendingSavedKey.apiKey
+		m.apiKeySource = apiKeySourceCredential
+	}
+	m.hasPendingKey = false
 }
 
 func (m tuiModel) View() tea.View {
@@ -524,6 +674,9 @@ func (m tuiModel) View() tea.View {
 		help.GotoTop()
 		detailView = help.View()
 	}
+	if m.showAPIKeyInput {
+		detailView = m.renderAPIKeyInput()
+	}
 
 	panes := lipgloss.JoinHorizontal(lipgloss.Top,
 		strings.Repeat(" ", horizontalOuterInset),
@@ -539,10 +692,12 @@ func (m tuiModel) View() tea.View {
 	}
 	if m.showHelp {
 		status = "Help open — press ? or Esc to close"
+	} else if m.showAPIKeyInput && !m.savingAPIKey {
+		status = "Enter validate/save • Ctrl+R remove saved key • Esc cancel"
 	}
 	lineWidth := max(1, m.width-horizontalOuterInset*2)
 	status = ansi.Truncate(status, lineWidth, "")
-	helpLine := ansi.Truncate(fmt.Sprintf("Active pane: %s • Tab/Shift+Tab panes • j/k move • d %s • f favorite • o page • u media • enter wallpaper • ? help • q quit", m.activePaneLabel(), m.detailToggleLabel()), lineWidth, "")
+	helpLine := ansi.Truncate(fmt.Sprintf("Active pane: %s • Tab/Shift+Tab panes • j/k move • d %s • a API key • f favorite • o page • u media • enter wallpaper • ? help • q quit", m.activePaneLabel(), m.detailToggleLabel()), lineWidth, "")
 	textInset := strings.Repeat(" ", horizontalOuterInset)
 
 	body := lipgloss.JoinVertical(
@@ -594,6 +749,7 @@ func (m *tuiModel) resize() {
 	m.favoriteList.SetSize(listInnerWidth, favoriteInnerHeight)
 	m.detail.SetWidth(detailInnerWidth)
 	m.detail.SetHeight(detailInnerHeight)
+	m.apiKeyInput.SetWidth(max(1, detailInnerWidth-lipgloss.Width(m.apiKeyInput.Prompt)))
 
 	m.previewArea = imageArea{width: detailInnerWidth}
 	m.refreshDetail(false)
@@ -657,13 +813,19 @@ func (m tuiModel) selectedRecord() APODRecord {
 	return selected.record
 }
 
-func runTUI(db *sql.DB, paths AppPaths, apiKey string, protocol imageProtocol) error {
+func runTUI(db *sql.DB, paths AppPaths, apiKey string, source apiKeySource, lookupCredential bool, protocol imageProtocol) error {
 	output := newNativeImageOutput(os.Stdout)
 	model, err := newTUIModelFromLibrary(db, paths, apiKey, protocol, time.Now())
 	if err != nil {
 		return err
 	}
 	model.nativeOutput = output
+	model.apiKeySource = source
+	model.lookupCredential = lookupCredential
+	model.syncStarted = !lookupCredential
+	if lookupCredential {
+		model.status = "Checking OS credential store for a saved NASA API key…"
+	}
 	program := tea.NewProgram(model, tea.WithOutput(output))
 	finalModel, err := program.Run()
 	model.cancelBackgroundSync()
@@ -681,6 +843,49 @@ func runTUI(db *sql.DB, paths AppPaths, apiKey string, protocol imageProtocol) e
 		}
 	}
 	return err
+}
+
+func saveAPIKeyCmd(apiKey string) tea.Cmd {
+	return func() tea.Msg {
+		err := saveAPIKey(apiKey)
+		return apiKeySavedMsg{apiKey: apiKey, err: err}
+	}
+}
+
+func removeAPIKeyCmd() tea.Cmd {
+	return func() tea.Msg {
+		return apiKeyRemovedMsg{err: removeSavedAPIKey()}
+	}
+}
+
+func loadSavedAPIKeyCmd() tea.Cmd {
+	return func() tea.Msg {
+		apiKey, err := lookupSavedAPIKey(credentialLookupTimeout)
+		if credentialNotFound(err) {
+			err = nil
+		}
+		return savedAPIKeyLoadedMsg{apiKey: apiKey, err: err}
+	}
+}
+
+func (m *tuiModel) closeAPIKeyInput() {
+	m.showAPIKeyInput = false
+	m.savingAPIKey = false
+	m.apiKeyInput.Reset()
+	m.apiKeyInput.Blur()
+}
+
+func (m tuiModel) renderAPIKeyInput() string {
+	return strings.Join([]string{
+		"NASA API Key",
+		"",
+		fmt.Sprintf("Current source: %s", m.apiKeySource),
+		"",
+		m.apiKeyInput.View(),
+		"",
+		"The key is validated with NASA before it is saved.",
+		"It is stored in your operating system credential manager.",
+	}, "\n")
 }
 
 func newTUIModelFromLibrary(db *sql.DB, paths AppPaths, apiKey string, protocol imageProtocol, now time.Time) (tuiModel, error) {
@@ -711,7 +916,7 @@ func newTUIModelFromLibrary(db *sql.DB, paths AppPaths, apiKey string, protocol 
 
 func (m tuiModel) nativeImageWanted() bool {
 	record := m.selectedRecord()
-	return (m.imageProtocol == imageProtocolKitty || m.imageProtocol == imageProtocolWezTerm) && !m.showDescription && !m.showHelp && record.PreviewPath != "" && m.previewArea.width > 0 && m.previewArea.height > 0
+	return (m.imageProtocol == imageProtocolKitty || m.imageProtocol == imageProtocolWezTerm) && !m.showDescription && !m.showHelp && !m.showAPIKeyInput && record.PreviewPath != "" && m.previewArea.width > 0 && m.previewArea.height > 0
 }
 
 func (m tuiModel) nativeImageKey() string {
@@ -837,6 +1042,14 @@ func (m tuiModel) prepareArchiveSyncCmd() tea.Cmd {
 		plan, err := prepareArchiveSyncContext(m.syncContext, m.db, m.apiKey, m.syncNow)
 		return archiveSyncPreparedMsg{plan: plan, err: err}
 	})
+}
+
+func (m *tuiModel) startArchiveSync() tea.Cmd {
+	if m.syncStarted {
+		return nil
+	}
+	m.syncStarted = true
+	return m.prepareArchiveSyncCmd()
 }
 
 func (m tuiModel) syncArchiveItemCmd(item APODResponse) tea.Cmd {
@@ -1171,6 +1384,7 @@ func (m tuiModel) renderHelpView() string {
 		"Actions",
 		"  Enter              Download/apply wallpaper for selected APOD",
 		"  d                  Toggle image and description views",
+		"  a                  Add or replace the saved NASA API key",
 		"  PgUp / PgDown      Scroll the description view",
 		"  Ctrl+U / Ctrl+D    Scroll half a description page",
 		"  f                  Favorite or unfavorite the selected APOD",

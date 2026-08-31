@@ -6,9 +6,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zalando/go-keyring"
 )
 
 func TestResolveAPIKey(t *testing.T) {
+	withCredentialStubs(t)
+	keyringGet = func(service, account string) (string, error) {
+		return "", keyring.ErrNotFound
+	}
 	t.Run("flag overrides environment", func(t *testing.T) {
 		t.Setenv("NASA_API_KEY", "ENV_KEY")
 		if got := resolveAPIKey("FLAG_KEY"); got != "FLAG_KEY" {

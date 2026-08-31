@@ -29,6 +29,12 @@ astrowall
 # With your own NASA API key
 astrowall --api-key YOUR_KEY
 
+# Securely save a NASA API key in the OS credential manager
+astrowall --save-api-key
+
+# Remove the saved NASA API key
+astrowall --remove-api-key
+
 # Random APOD
 astrowall --random
 
@@ -58,7 +64,9 @@ astrowall --cycle-favorites
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--api-key` | `-a` | `DEMO_KEY` | NASA API key |
+| `--api-key` | `-a` | | NASA API key override; final fallback is `DEMO_KEY` |
+| `--save-api-key` | | `false` | Interactively validate and securely save a NASA API key |
+| `--remove-api-key` | | `false` | Remove the saved NASA API key |
 | `--random` | `-r` | `false` | Fetch a random APOD |
 | `--verbose` | `-v` | `true` | Show image details after setting wallpaper |
 | `--output` | `-o` | `~/Pictures/apod_wallpaper.jpg` | Custom save path |
@@ -75,7 +83,10 @@ The tool resolves the API key in this order:
 
 1. `--api-key` flag
 2. `NASA_API_KEY` environment variable
-3. Falls back to `DEMO_KEY` (rate-limited to 30 requests/hour)
+3. Saved OS credential
+4. Falls back to `DEMO_KEY` (rate-limited to 30 requests/hour)
+
+`astrowall --save-api-key` reads the key without terminal echo, validates it with NASA, and stores it in the operating system credential manager: Secret Service on Linux, Keychain on macOS, or Credential Manager on Windows. The key is never stored in Astrowall's database or configuration files.
 
 For heavier usage, get a free API key at [api.nasa.gov](https://api.nasa.gov/).
 
@@ -109,6 +120,7 @@ Current behavior:
 - `f`: favorite or unfavorite the selected item
 - `Enter`: fetch the selected day's image and set it as wallpaper
 - `d`: toggle between the selected APOD image and description
+- `a`: add, replace, or remove the saved NASA API key
 
 In `auto` mode, direct WezTerm sessions use WezTerm's standard Kitty image placement support, while compatible Kitty and Ghostty sessions use Kitty Unicode placeholders. Other terminals use ANSI half-block output. Auto mode remains conservative inside tmux; force Kitty graphics with `--image-protocol kitty` after confirming support and enabling passthrough:
 

@@ -24,6 +24,8 @@ func main() {
 		tuiMode        bool
 		cycleFavorites bool
 		syncOnly       bool
+		saveKey        bool
+		removeKey      bool
 		showVer        bool
 	)
 
@@ -36,6 +38,8 @@ func main() {
 	flag.BoolVar(&tuiMode, "tui", false, "Launch the text-based APOD browser")
 	flag.BoolVar(&cycleFavorites, "cycle-favorites", false, "Set the next favorite wallpaper from the local library")
 	flag.BoolVar(&syncOnly, "sync-only", false, "Sync the local APOD library and preview cache, then exit")
+	flag.BoolVar(&saveKey, "save-api-key", false, "Validate and securely save a NASA API key")
+	flag.BoolVar(&removeKey, "remove-api-key", false, "Remove the saved NASA API key")
 	flag.BoolVar(&showVer, "version", false, "Show version and exit")
 
 	flag.Usage = func() {
@@ -51,7 +55,6 @@ func main() {
 		return
 	}
 
-	key := resolveAPIKey(apiKey)
 	protocol, err := parseImageProtocol(imageProtocol)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -62,6 +65,36 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error: --random and --date cannot be used together.")
 		os.Exit(1)
 	}
+	if saveKey && removeKey {
+		fmt.Fprintln(os.Stderr, "Error: --save-api-key and --remove-api-key cannot be used together.")
+		os.Exit(1)
+	}
+	if saveKey || removeKey {
+		if apiKey != "" || random || date != "" || output != "" || tuiMode || cycleFavorites || syncOnly || protocol != imageProtocolAuto {
+			fmt.Fprintln(os.Stderr, "Error: API key management flags cannot be combined with other operation modes.")
+			os.Exit(1)
+		}
+		if removeKey {
+			if err := removeSavedAPIKey(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("Removed saved NASA API key.")
+			return
+		}
+		key, err := readAPIKey(os.Stdin, os.Stdout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := saveAPIKey(key); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("NASA API key validated and saved securely.")
+		return
+	}
+
 	if tuiMode && (random || date != "" || output != "") {
 		fmt.Fprintln(os.Stderr, "Error: --tui cannot be combined with --random, --date, or --output.")
 		os.Exit(1)
@@ -79,6 +112,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	var (
+		key                   string
+		keySource             apiKeySource
+		keyErr                error
+		lookupCredentialInTUI bool
+	)
+	if tuiMode {
+		if explicitKey, explicitSource, ok := resolveExplicitAPIKey(apiKey, os.Getenv); ok {
+			key, keySource = explicitKey, explicitSource
+		} else {
+			key, keySource = "DEMO_KEY", apiKeySourceDemo
+			lookupCredentialInTUI = true
+		}
+	} else {
+		key, keySource, keyErr = resolveAPIKeyWithSource(apiKey, os.Getenv)
+	}
+	if keyErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v; using DEMO_KEY.\n", keyErr)
+	}
+
 	paths, db, err := initializeLibrary()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error initializing local library: %v\n", err)
@@ -87,7 +140,7 @@ func main() {
 	defer db.Close()
 
 	if tuiMode {
-		if err := runTUI(db, paths, key, protocol); err != nil {
+		if err := runTUI(db, paths, key, keySource, lookupCredentialInTUI, protocol); err != nil {
 			fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
 			os.Exit(1)
 		}
@@ -162,13 +215,8 @@ func main() {
 }
 
 func resolveAPIKey(flagValue string) string {
-	if flagValue != "" {
-		return flagValue
-	}
-	if value := os.Getenv("NASA_API_KEY"); value != "" {
-		return value
-	}
-	return "DEMO_KEY"
+	key, _, _ := resolveAPIKeyWithSource(flagValue, os.Getenv)
+	return key
 }
 
 func initializeLibrary() (AppPaths, *sql.DB, error) {

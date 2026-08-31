@@ -70,7 +70,7 @@ func buildAPODRangeURL(apiKey, startDate, endDate string) string {
 func fetchAPOD(url string) (APODResponse, error) {
 	resp, err := httpGet(url)
 	if err != nil {
-		return APODResponse{}, fmt.Errorf("request failed: %w", err)
+		return APODResponse{}, fmt.Errorf("APOD request failed")
 	}
 	defer resp.Body.Close()
 
@@ -80,7 +80,7 @@ func fetchAPOD(url string) (APODResponse, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return APODResponse{}, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
+		return APODResponse{}, fmt.Errorf("APOD API returned HTTP %d", resp.StatusCode)
 	}
 
 	// Random mode returns a JSON array; normal mode returns a single object.
@@ -103,7 +103,7 @@ func fetchAPODRange(url string) ([]APODResponse, error) {
 func fetchAPODRangeContext(ctx context.Context, url string) ([]APODResponse, error) {
 	resp, err := httpGetContext(ctx, url)
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("APOD range request failed")
 	}
 	defer resp.Body.Close()
 
@@ -113,7 +113,7 @@ func fetchAPODRangeContext(ctx context.Context, url string) ([]APODResponse, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("APOD range API returned HTTP %d", resp.StatusCode)
 	}
 
 	var arr []APODResponse
@@ -135,7 +135,7 @@ func downloadImage(url, path string) error {
 func downloadImageContext(ctx context.Context, url, targetPath string) error {
 	resp, err := httpGetContext(ctx, url)
 	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return fmt.Errorf("image request failed")
 	}
 	defer resp.Body.Close()
 
