@@ -26,7 +26,7 @@ type apodListItem struct {
 }
 
 func (i apodListItem) FilterValue() string {
-	return i.record.Title + " " + i.record.Date
+	return strings.Join([]string{i.record.Title, i.record.Date, i.record.Description}, " ")
 }
 
 func (i apodListItem) Title() string {
@@ -148,6 +148,7 @@ type tuiModel struct {
 	commands         *commandTracker
 	nativeOutput     *nativeImageOutput
 	activePane       activePane
+	searchOriginal   [2]string
 	spinner          spinner.Model
 	listStyle        lipgloss.Style
 	detailStyle      lipgloss.Style
@@ -212,8 +213,9 @@ func newListModel(title string, records []APODRecord) list.Model {
 	listModel.SetShowHelp(false)
 	listModel.SetShowStatusBar(false)
 	listModel.SetShowPagination(true)
-	listModel.SetShowFilter(false)
-	listModel.SetFilteringEnabled(false)
+	listModel.SetShowFilter(true)
+	listModel.SetFilteringEnabled(true)
+	listModel.KeyMap.AcceptWhileFiltering.SetKeys("enter")
 	listModel.DisableQuitKeybindings()
 	return listModel
 }
@@ -241,7 +243,7 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 		apiKey:          apiKey,
 		apiKeySource:    apiKeySourceDemo,
 		apiKeyInput:     keyInput,
-		status:          "j/k move • tab switch pane • d description • enter set wallpaper • f favorite • o page • u media • ? help • q quit",
+		status:          "j/k move • / search • tab switch pane • d description • enter set wallpaper • f favorite • o page • u media • ? help • q quit",
 		activePane:      recentPane,
 		spinner:         spin,
 		nativeOutput:    newNativeImageOutput(io.Discard),
@@ -322,16 +324,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 		}
-		if isHelpToggleKey(msg) {
-			m.showHelp = !m.showHelp
-			if m.showHelp {
-				return m, m.clearNativeImage()
-			}
-			return m, m.requestNativeImage()
-		}
 		if m.showHelp {
 			switch {
-			case isHelpCloseKey(msg):
+			case isHelpToggleKey(msg), isHelpCloseKey(msg):
 				m.showHelp = false
 				return m, m.requestNativeImage()
 			case msg.String() == "q", msg.String() == "ctrl+c":
@@ -340,6 +335,41 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				return m, nil
 			}
+		}
+		if m.activeList().SettingFilter() {
+			if msg.String() == "ctrl+c" {
+				m.cancelBackgroundSync()
+				return m, tea.Sequence(m.clearNativeImage(), tea.Quit)
+			}
+			if isHelpCloseKey(msg) {
+				return m, m.cancelSearch()
+			}
+			if msg.String() == "enter" {
+				activeList := m.activeList()
+				if strings.TrimSpace(activeList.FilterValue()) == "" {
+					activeList.ResetFilter()
+				} else {
+					activeList.SetFilterText(activeList.FilterValue())
+					activeList.SetFilterState(list.FilterApplied)
+					activeList.FilterInput.Blur()
+				}
+				m.setActiveList(activeList)
+				m.searchOriginal[m.activePane] = ""
+				m.updatePaneTitles()
+				m.refreshDetail(true)
+				return m, m.requestNativeImage()
+			}
+			return m, m.updateSearch(msg)
+		}
+		if msg.String() == "/" {
+			return m, tea.Batch(m.startSearch(), m.clearNativeImage())
+		}
+		if isHelpCloseKey(msg) && m.activeList().IsFiltered() {
+			return m, m.clearSearch()
+		}
+		if isHelpToggleKey(msg) {
+			m.showHelp = true
+			return m, m.clearNativeImage()
 		}
 
 		if isNextPaneKey(msg) {
@@ -631,6 +661,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.apiKeyInput, cmd = m.apiKeyInput.Update(msg)
 		return m, cmd
 	}
+	if m.activeList().SettingFilter() {
+		return m, m.updateSearch(msg)
+	}
 
 	before := m.activeList().Index()
 	updatedList, listCmd := m.activeList().Update(msg)
@@ -697,7 +730,7 @@ func (m tuiModel) View() tea.View {
 	}
 	lineWidth := max(1, m.width-horizontalOuterInset*2)
 	status = ansi.Truncate(status, lineWidth, "")
-	helpLine := ansi.Truncate(fmt.Sprintf("Active pane: %s • Tab/Shift+Tab panes • j/k move • d %s • a API key • f favorite • o page • u media • enter wallpaper • ? help • q quit", m.activePaneLabel(), m.detailToggleLabel()), lineWidth, "")
+	helpLine := ansi.Truncate(fmt.Sprintf("Active pane: %s • / search • Tab/Shift+Tab panes • j/k move • d %s • a API key • f favorite • o page • u media • enter wallpaper • ? help • q quit", m.activePaneLabel(), m.detailToggleLabel()), lineWidth, "")
 	textInset := strings.Repeat(" ", horizontalOuterInset)
 
 	body := lipgloss.JoinVertical(
@@ -916,7 +949,7 @@ func newTUIModelFromLibrary(db *sql.DB, paths AppPaths, apiKey string, protocol 
 
 func (m tuiModel) nativeImageWanted() bool {
 	record := m.selectedRecord()
-	return (m.imageProtocol == imageProtocolKitty || m.imageProtocol == imageProtocolWezTerm) && !m.showDescription && !m.showHelp && !m.showAPIKeyInput && record.PreviewPath != "" && m.previewArea.width > 0 && m.previewArea.height > 0
+	return (m.imageProtocol == imageProtocolKitty || m.imageProtocol == imageProtocolWezTerm) && !m.showDescription && !m.showHelp && !m.showAPIKeyInput && !m.activeList().SettingFilter() && record.PreviewPath != "" && m.previewArea.width > 0 && m.previewArea.height > 0
 }
 
 func (m tuiModel) nativeImageKey() string {
@@ -1111,7 +1144,7 @@ func selectListDate(listModel *list.Model, date string) {
 	if date == "" {
 		return
 	}
-	for i, item := range listModel.Items() {
+	for i, item := range listModel.VisibleItems() {
 		record, ok := item.(apodListItem)
 		if ok && record.record.Date == date {
 			listModel.Select(i)
@@ -1200,13 +1233,23 @@ func (m *tuiModel) syncSingleList(target *list.Model, records []APODRecord) {
 		items = append(items, apodListItem{record: record})
 	}
 	selected := target.Index()
+	query := target.FilterValue()
+	filterState := target.FilterState()
 	target.SetItems(items)
-	if len(items) == 0 {
+	if filterState != list.Unfiltered {
+		target.SetFilterText(query)
+		target.SetFilterState(filterState)
+		if filterState != list.Filtering {
+			target.FilterInput.Blur()
+		}
+	}
+	visibleItems := target.VisibleItems()
+	if len(visibleItems) == 0 {
 		target.Select(0)
 		return
 	}
-	if selected >= len(items) {
-		selected = len(items) - 1
+	if selected >= len(visibleItems) {
+		selected = len(visibleItems) - 1
 	}
 	target.Select(selected)
 }
@@ -1224,6 +1267,58 @@ func (m *tuiModel) setActiveList(updated list.Model) {
 		return
 	}
 	m.recentList = updated
+}
+
+func (m *tuiModel) updateSearch(msg tea.Msg) tea.Cmd {
+	beforeDate := m.selectedRecord().Date
+	activeList := m.activeList()
+	updatedInput, cmd := activeList.FilterInput.Update(msg)
+	activeList.FilterInput = updatedInput
+	query := activeList.FilterValue()
+	activeList.SetFilterText(query)
+	activeList.SetFilterState(list.Filtering)
+	activeList.FilterInput.Focus()
+	m.setActiveList(activeList)
+	m.updatePaneTitles()
+	if m.selectedRecord().Date != beforeDate {
+		m.refreshDetail(true)
+	}
+	return cmd
+}
+
+func (m *tuiModel) startSearch() tea.Cmd {
+	activeList := m.activeList()
+	m.searchOriginal[m.activePane] = activeList.FilterValue()
+	activeList.SetFilterText(activeList.FilterValue())
+	activeList.SetFilterState(list.Filtering)
+	activeList.FilterInput.Focus()
+	m.setActiveList(activeList)
+	return textinput.Blink
+}
+
+func (m *tuiModel) cancelSearch() tea.Cmd {
+	activeList := m.activeList()
+	original := m.searchOriginal[m.activePane]
+	if original == "" {
+		activeList.ResetFilter()
+	} else {
+		activeList.SetFilterText(original)
+		activeList.FilterInput.Blur()
+	}
+	m.searchOriginal[m.activePane] = ""
+	m.setActiveList(activeList)
+	m.updatePaneTitles()
+	m.refreshDetail(true)
+	return m.requestNativeImage()
+}
+
+func (m *tuiModel) clearSearch() tea.Cmd {
+	activeList := m.activeList()
+	activeList.ResetFilter()
+	m.setActiveList(activeList)
+	m.updatePaneTitles()
+	m.refreshDetail(true)
+	return m.requestNativeImage()
 }
 
 func (m tuiModel) nextPane(reverse bool) activePane {
@@ -1281,13 +1376,19 @@ func limitRenderedPane(content string, height int) string {
 }
 
 func (m *tuiModel) updatePaneTitles() {
-	if m.activePane == recentPane {
-		m.recentList.Title = "Recent APODs • active"
-		m.favoriteList.Title = "Favorites"
-		return
+	m.recentList.Title = m.paneTitle("Recent APODs", recentPane, m.recentList)
+	m.favoriteList.Title = m.paneTitle("Favorites", favoritesPane, m.favoriteList)
+}
+
+func (m tuiModel) paneTitle(title string, pane activePane, listModel list.Model) string {
+	if listModel.IsFiltered() {
+		query := ansi.Truncate(strings.TrimSpace(listModel.FilterValue()), 16, "…")
+		title += fmt.Sprintf(" • %q (%d)", query, len(listModel.VisibleItems()))
 	}
-	m.recentList.Title = "Recent APODs"
-	m.favoriteList.Title = "Favorites • active"
+	if m.activePane == pane {
+		title += " • active"
+	}
+	return title
 }
 
 func (m tuiModel) activePaneLabel() string {
@@ -1353,14 +1454,14 @@ func isHelpCloseKey(msg tea.KeyPressMsg) bool {
 }
 
 func isHelpToggleKey(msg tea.KeyPressMsg) bool {
-	if msg.String() == "?" || msg.String() == "/" {
+	if msg.String() == "?" {
 		return true
 	}
 	key := msg.Key()
-	if key.Text == "?" || key.Text == "/" {
+	if key.Text == "?" {
 		return true
 	}
-	if key.Code == '/' || key.ShiftedCode == '?' {
+	if key.ShiftedCode == '?' {
 		return true
 	}
 	return false
@@ -1380,6 +1481,8 @@ func (m tuiModel) renderHelpView() string {
 		"  j / k              Move within the active pane",
 		"  Tab                Switch to the next pane",
 		"  Shift+Tab          Switch to the previous pane",
+		"  /                  Search the active pane",
+		"  Esc                Clear an applied search",
 		"",
 		"Actions",
 		"  Enter              Download/apply wallpaper for selected APOD",

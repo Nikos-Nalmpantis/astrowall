@@ -1242,18 +1242,262 @@ func TestTUIModelEscClosesHelpView(t *testing.T) {
 	}
 }
 
-func TestTUIModelSlashAlsoTogglesHelpView(t *testing.T) {
-	recent := []APODRecord{{Date: "2024-09-27", Title: "Recent", Description: "Recent item.", MediaType: "image", URL: "https://example.com/recent.jpg"}}
-
-	m := newTUIModel(recent, nil, "KEY")
+func TestTUIModelEscClosesHelpBeforeClearingSearch(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Title: "Aurora"}, {Title: "Galaxy"}}, nil, "KEY")
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = updated.(tuiModel)
+	m = typeSearchQuery(t, m, "Galaxy")
+	m.showHelp = true
 
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = updated.(tuiModel)
+	if m.showHelp || !m.recentList.IsFiltered() {
+		t.Fatalf("showHelp = %t, filtered = %t", m.showHelp, m.recentList.IsFiltered())
+	}
+}
+
+func TestTUIModelSearchesTitleDateAndDescription(t *testing.T) {
+	records := []APODRecord{
+		{Date: "2024-09-27", Title: "Aurora", Description: "Lights over Iceland."},
+		{Date: "2024-09-26", Title: "Galaxy", Description: "A distant spiral nebula."},
+	}
+
+	for _, query := range []string{"Galaxy", "2024-09-26", "nebula"} {
+		m := newTUIModel(records, nil, "KEY")
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+		m = updated.(tuiModel)
+		m = typeSearchQuery(t, m, query)
+		if got := m.selectedRecord().Title; got != "Galaxy" {
+			t.Fatalf("query %q selected %q, want Galaxy", query, got)
+		}
+		if len(m.recentList.VisibleItems()) != 1 {
+			t.Fatalf("query %q has %d visible items", query, len(m.recentList.VisibleItems()))
+		}
+	}
+}
+
+func TestTUIModelSearchIsIndependentPerPane(t *testing.T) {
+	recent := []APODRecord{{Date: "2024-09-27", Title: "Recent Aurora"}, {Date: "2024-09-26", Title: "Recent Galaxy"}}
+	favorites := []APODRecord{{Date: "2024-09-25", Title: "Favorite Moon", Favorite: true}, {Date: "2024-09-24", Title: "Favorite Nebula", Favorite: true}}
+	m := newTUIModel(recent, favorites, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	m = typeSearchQuery(t, m, "Galaxy")
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = updated.(tuiModel)
+	m = typeSearchQuery(t, m, "Moon")
+	if m.recentList.FilterValue() != "Galaxy" || m.favoriteList.FilterValue() != "Moon" {
+		t.Fatalf("recent query = %q, favorite query = %q", m.recentList.FilterValue(), m.favoriteList.FilterValue())
+	}
+}
+
+func TestTUIModelEscapeClearsAppliedSearch(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Title: "Aurora"}, {Title: "Galaxy"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	m = typeSearchQuery(t, m, "Galaxy")
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = updated.(tuiModel)
+	if m.recentList.IsFiltered() || len(m.recentList.VisibleItems()) != 2 {
+		t.Fatalf("filtered = %t, visible = %d", m.recentList.IsFiltered(), len(m.recentList.VisibleItems()))
+	}
+}
+
+func TestTUIModelSearchTitleShowsQueryAndMatchCount(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Title: "Aurora"}, {Title: "Galaxy"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	m = typeSearchQuery(t, m, "Galaxy")
+	if !strings.Contains(m.recentList.Title, `"Galaxy" (1)`) {
+		t.Fatalf("recent title = %q", m.recentList.Title)
+	}
+}
+
+func TestTUIModelSearchAcceptsOnlyEnter(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Title: "Aurora"}, {Title: "Galaxy"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
 	updated, _ = m.Update(tea.KeyPressMsg{Text: "/", Code: '/'})
 	m = updated.(tuiModel)
-	if !m.showHelp {
-		t.Fatal("showHelp = false, want true after slash toggle")
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "Galaxy"})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = updated.(tuiModel)
+	if !m.recentList.SettingFilter() || m.activePane != recentPane {
+		t.Fatalf("filtering = %t, pane = %v", m.recentList.SettingFilter(), m.activePane)
 	}
+}
+
+func TestTUIModelCanApplySearchWithNoMatches(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Title: "Aurora"}, {Title: "Galaxy"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	m = typeSearchQuery(t, m, "Saturn")
+	if !m.recentList.IsFiltered() || len(m.recentList.VisibleItems()) != 0 {
+		t.Fatalf("filtered = %t, visible = %d", m.recentList.IsFiltered(), len(m.recentList.VisibleItems()))
+	}
+}
+
+func TestTUIModelEmptySearchResetsFilter(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Title: "Aurora"}, {Title: "Galaxy"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "/", Code: '/'})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(tuiModel)
+	if m.recentList.IsFiltered() || m.recentList.FilterValue() != "" {
+		t.Fatalf("filtered = %t, query = %q", m.recentList.IsFiltered(), m.recentList.FilterValue())
+	}
+}
+
+func TestTUIModelStartingEmptySearchKeepsAllItemsVisible(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Title: "Aurora"}, {Title: "Galaxy"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "/", Code: '/'})
+	m = updated.(tuiModel)
+	if len(m.recentList.VisibleItems()) != 2 {
+		t.Fatalf("visible items = %d, want 2", len(m.recentList.VisibleItems()))
+	}
+}
+
+func TestTUIModelBackspaceToEmptySearchKeepsAllItemsVisible(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Title: "Aurora"}, {Title: "Galaxy"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "/", Code: '/'})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "A", Code: 'A'})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	m = updated.(tuiModel)
+	if m.recentList.FilterValue() != "" || len(m.recentList.VisibleItems()) != 2 {
+		t.Fatalf("query = %q, visible = %d", m.recentList.FilterValue(), len(m.recentList.VisibleItems()))
+	}
+}
+
+func TestTUIModelPasteMessageUpdatesSearchSynchronously(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Title: "Aurora"}, {Title: "Galaxy"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "/", Code: '/'})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.PasteMsg{Content: "Galaxy"})
+	m = updated.(tuiModel)
+	if m.recentList.FilterValue() != "Galaxy" || len(m.recentList.VisibleItems()) != 1 {
+		t.Fatalf("query = %q, visible = %d", m.recentList.FilterValue(), len(m.recentList.VisibleItems()))
+	}
+}
+
+func TestTUIModelRebuildDuringEmptySearchKeepsAllItemsVisible(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Title: "Aurora"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "/", Code: '/'})
+	m = updated.(tuiModel)
+	m.recentRecords = append(m.recentRecords, APODRecord{Title: "Galaxy"})
+	m.syncListItems()
+	if len(m.recentList.VisibleItems()) != 2 {
+		t.Fatalf("visible items = %d, want 2", len(m.recentList.VisibleItems()))
+	}
+}
+
+func TestTUIModelCtrlCQuitsWhileSearching(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Title: "Aurora"}}, nil, "KEY")
+	updated, _ := m.Update(tea.KeyPressMsg{Text: "/", Code: '/'})
+	m = updated.(tuiModel)
+	_, cmd := m.Update(tea.KeyPressMsg{Text: "ctrl+c", Code: 'c', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("Ctrl+C command = nil while searching")
+	}
+}
+
+func TestTUIModelFilteredRebuildClampsVisibleSelection(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Date: "1", Title: "Galaxy One"}, {Date: "2", Title: "Galaxy Two"}, {Date: "3", Title: "Aurora"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	m = typeSearchQuery(t, m, "Galaxy")
+	m.recentList.Select(1)
+	m.recentRecords = []APODRecord{{Date: "1", Title: "Galaxy One"}, {Date: "3", Title: "Aurora"}, {Date: "4", Title: "Moon"}}
+	m.syncListItems()
+	if got := m.selectedRecord().Date; got != "1" {
+		t.Fatalf("selected date = %q after filtered rebuild", got)
+	}
+}
+
+func TestTUIModelSearchUpdatesOneCharacterAtATime(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Title: "Aurora"}, {Title: "Galaxy"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "/", Code: '/'})
+	m = updated.(tuiModel)
+	for _, character := range "Galaxy" {
+		updated, _ = m.Update(tea.KeyPressMsg{Text: string(character), Code: character})
+		m = updated.(tuiModel)
+	}
+	if m.recentList.FilterValue() != "Galaxy" || len(m.recentList.VisibleItems()) != 1 {
+		t.Fatalf("query = %q, visible = %d", m.recentList.FilterValue(), len(m.recentList.VisibleItems()))
+	}
+}
+
+func TestTUIModelNativePreviewStaysDisabledWhileSearching(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Title: "Aurora", PreviewPath: "/preview.jpg"}}, nil, "KEY")
+	m.imageProtocol = imageProtocolWezTerm
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "/", Code: '/'})
+	m = updated.(tuiModel)
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "A", Code: 'A'})
+	m = updated.(tuiModel)
+	if m.nativeImageWanted() || m.nativeRequest != "" || cmd == nil {
+		t.Fatalf("wanted = %t, request = %q, command = %v", m.nativeImageWanted(), m.nativeRequest, cmd)
+	}
+}
+
+func TestTUIModelCancelSearchRestoresPreviousQuery(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Title: "Aurora"}, {Title: "Galaxy"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	m = typeSearchQuery(t, m, "Galaxy")
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "/", Code: '/'})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "X", Code: 'X'})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = updated.(tuiModel)
+	if m.recentList.FilterValue() != "Galaxy" || !m.recentList.IsFiltered() {
+		t.Fatalf("query = %q, filtered = %t", m.recentList.FilterValue(), m.recentList.IsFiltered())
+	}
+}
+
+func TestTUIModelSyncListItemsPreservesAppliedSearch(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Title: "Aurora"}, {Title: "Galaxy"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	m = typeSearchQuery(t, m, "Galaxy")
+	m.recentRecords = append(m.recentRecords, APODRecord{Title: "Another Galaxy"})
+	m.syncListItems()
+
+	if !m.recentList.IsFiltered() || len(m.recentList.VisibleItems()) != 2 {
+		t.Fatalf("filtered = %t, visible = %d", m.recentList.IsFiltered(), len(m.recentList.VisibleItems()))
+	}
+}
+
+func typeSearchQuery(t *testing.T, m tuiModel, query string) tuiModel {
+	t.Helper()
+	updated, _ := m.Update(tea.KeyPressMsg{Text: "/", Code: '/'})
+	m = updated.(tuiModel)
+	if !m.activeList().SettingFilter() {
+		t.Fatal("active list is not editing a search")
+	}
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: query})
+	m = updated.(tuiModel)
+	_ = cmd
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	return updated.(tuiModel)
 }
 
 func TestListFavoriteAPODsReturnsPersistentFavorites(t *testing.T) {

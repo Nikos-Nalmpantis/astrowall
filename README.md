@@ -115,6 +115,9 @@ Current behavior:
 - left column: separate `Recent APODs` and `Favorites` panes
 - right pane: the selected item's date, type, cache status, and description
 - `j` / `k`: move through the list
+- `/`: search the active pane by title, date, or description
+- `Enter`: apply the current search
+- `Esc`: cancel search editing or clear an applied search
 - `Tab` / `Shift+Tab`: switch between `Recent APODs` and `Favorites`
 - `q`: quit
 - `f`: favorite or unfavorite the selected item
