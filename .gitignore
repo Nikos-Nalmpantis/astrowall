@@ -11,3 +11,6 @@ astrowall.exe
 # OS
 .DS_Store
 Thumbs.db
+
+# Opencode
+.omo/
