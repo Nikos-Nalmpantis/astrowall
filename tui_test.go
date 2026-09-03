@@ -855,7 +855,7 @@ func TestTUIModelAddsBackgroundSyncItemsIncrementally(t *testing.T) {
 	}
 }
 
-func TestTUIModelStopsBackgroundSyncAfterItemFailure(t *testing.T) {
+func TestTUIModelContinuesBackgroundSyncAfterPreviewFailure(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
 	paths, err := resolveAppPaths()
@@ -877,16 +877,32 @@ func TestTUIModelStopsBackgroundSyncAfterItemFailure(t *testing.T) {
 	m.syncItems = []APODResponse{{Date: "2024-09-26"}, {Date: "2024-09-27"}}
 	m.syncTotal = len(m.syncItems)
 
+	if err := upsertAPOD(db, APODRecord{Date: "2024-09-26", Title: "Failed preview", PreviewError: "permission denied", FetchedAt: time.Now()}); err != nil {
+		t.Fatalf("upsertAPOD() error: %v", err)
+	}
+	updated, cmd := m.Update(archiveItemSyncedMsg{date: "2024-09-26", previewError: "permission denied"})
+	m = updated.(tuiModel)
+	if cmd == nil {
+		t.Fatal("next item command is nil after preview failure")
+	}
+	if !m.syncing {
+		t.Fatal("syncing = false after recoverable preview failure")
+	}
+	if len(m.recentRecords) != 1 || m.recentRecords[0].PreviewError == "" {
+		t.Fatalf("recent records = %#v", m.recentRecords)
+	}
+}
+
+func TestTUIModelStopsBackgroundSyncAfterFatalItemFailure(t *testing.T) {
+	m := newTUIModel(nil, nil, "KEY")
+	m.syncing = true
+	m.syncItems = []APODResponse{{Date: "2024-09-26"}, {Date: "2024-09-27"}}
+	m.syncTotal = len(m.syncItems)
+
 	updated, cmd := m.Update(archiveItemSyncedMsg{date: "2024-09-26", err: os.ErrPermission})
 	m = updated.(tuiModel)
-	if cmd != nil {
-		t.Fatal("next item command is not nil after item failure")
-	}
-	if m.syncing {
-		t.Fatal("syncing = true after item failure")
-	}
-	if !strings.Contains(m.status, "Library sync failed for 2024-09-26") {
-		t.Fatalf("status = %q", m.status)
+	if cmd != nil || m.syncing || !strings.Contains(m.status, "Library sync failed for 2024-09-26") {
+		t.Fatalf("fatal failure state: syncing=%v status=%q cmd=%v", m.syncing, m.status, cmd)
 	}
 }
 
@@ -904,6 +920,17 @@ func TestTUIModelReportsEmptyBackgroundSync(t *testing.T) {
 	}
 	if m.status != "Library sync returned no APODs" {
 		t.Fatalf("status = %q", m.status)
+	}
+}
+
+func TestAPODListItemShowsPreviewError(t *testing.T) {
+	item := apodListItem{record: APODRecord{Date: "2024-09-27", PreviewError: "download timed out"}}
+	if got := item.Description(); got != "2024-09-27 • preview error" {
+		t.Fatalf("Description() = %q", got)
+	}
+	m := newTUIModel([]APODRecord{item.record}, nil, "KEY")
+	if got := strings.Join(m.detailHeader(item.record), "\n"); !strings.Contains(got, "Preview error: download timed out") {
+		t.Fatalf("detail header = %q", got)
 	}
 }
 

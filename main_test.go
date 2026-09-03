@@ -104,7 +104,7 @@ func TestPrintSyncSummary(t *testing.T) {
 	t.Run("sync summary output", func(t *testing.T) {
 		var buf bytes.Buffer
 		printSyncSummary(&buf, SyncResult{FetchedCount: 3, PreviewedCount: 2, StartDate: "2024-09-25", EndDate: "2024-09-27"})
-		if got := buf.String(); got != "Synced 3 APOD items and cached 2 previews for 2024-09-25 through 2024-09-27.\n" {
+		if got := buf.String(); got != "Synced 3 APOD items and cached 2 previews (0 preview errors) for 2024-09-25 through 2024-09-27.\n" {
 			t.Fatalf("printSyncSummary() = %q", got)
 		}
 	})

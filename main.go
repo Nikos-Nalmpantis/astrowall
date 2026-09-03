@@ -253,9 +253,10 @@ func printSyncSummary(w io.Writer, result SyncResult) {
 
 	fmt.Fprintf(
 		w,
-		"Synced %d APOD items and cached %d previews for %s through %s.\n",
+		"Synced %d APOD items and cached %d previews (%d preview errors) for %s through %s.\n",
 		result.FetchedCount,
 		result.PreviewedCount,
+		result.PreviewFailedCount,
 		result.StartDate,
 		result.EndDate,
 	)

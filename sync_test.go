@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -323,6 +324,121 @@ func TestSyncAPODArchive_PersistsMetadataAndPreviews(t *testing.T) {
 	}
 	if apodCalls != 1 {
 		t.Fatalf("APOD API calls = %d, want 1", apodCalls)
+	}
+}
+
+func TestSyncAPODArchive_ContinuesAfterPreviewFailureAndRetriesIt(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+	paths, err := resolveAppPaths()
+	if err != nil {
+		t.Fatalf("resolveAppPaths() error: %v", err)
+	}
+	db, err := openLibrary(paths.DBPath)
+	if err != nil {
+		t.Fatalf("openLibrary() error: %v", err)
+	}
+	defer db.Close()
+
+	items := []APODResponse{
+		{Date: "2024-09-25", Title: "First", MediaType: "image"},
+		{Date: "2024-09-26", Title: "Broken", MediaType: "image"},
+		{Date: "2024-09-27", Title: "Last", MediaType: "image"},
+	}
+	brokenAvailable := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/planetary/apod":
+			json.NewEncoder(w).Encode(items)
+		case "/broken.jpg":
+			if !brokenAvailable {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			w.Write([]byte("preview"))
+		default:
+			w.Write([]byte("preview"))
+		}
+	}))
+	defer server.Close()
+	items[0].URL = server.URL + "/first.jpg"
+	items[1].URL = server.URL + "/broken.jpg"
+	items[2].URL = server.URL + "/last.jpg"
+
+	originalBaseURL := apodAPIBaseURL
+	apodAPIBaseURL = server.URL + "/planetary/apod"
+	defer func() { apodAPIBaseURL = originalBaseURL }()
+
+	now := time.Date(2024, 9, 27, 9, 0, 0, 0, time.UTC)
+	result, err := syncAPODArchive(db, paths, "KEY", now)
+	if err != nil {
+		t.Fatalf("syncAPODArchive() error: %v", err)
+	}
+	if result.FetchedCount != 3 || result.PreviewedCount != 2 || result.PreviewFailedCount != 1 {
+		t.Fatalf("sync result = %#v", result)
+	}
+	if count, err := apodCount(db); err != nil || count != 3 {
+		t.Fatalf("apodCount() = %d, %v; want 3, nil", count, err)
+	}
+	broken, err := recordByDate(db, "2024-09-26")
+	if err != nil {
+		t.Fatalf("recordByDate() error: %v", err)
+	}
+	if broken.PreviewPath != "" || broken.PreviewError == "" {
+		t.Fatalf("broken record = %#v", broken)
+	}
+	last, err := recordByDate(db, "2024-09-27")
+	if err != nil {
+		t.Fatalf("recordByDate() error: %v", err)
+	}
+	if last.PreviewPath == "" || last.PreviewError != "" {
+		t.Fatalf("last record = %#v", last)
+	}
+
+	plan, err := prepareArchiveSync(db, "KEY", now)
+	if err != nil {
+		t.Fatalf("prepareArchiveSync() error: %v", err)
+	}
+	if plan.AlreadyUpToDate || len(plan.Items) != 1 || plan.Items[0].Date != "2024-09-26" {
+		t.Fatalf("retry plan = %#v", plan)
+	}
+	brokenAvailable = true
+	result, err = syncAPODArchive(db, paths, "KEY", now)
+	if err != nil {
+		t.Fatalf("retry syncAPODArchive() error: %v", err)
+	}
+	if result.PreviewedCount != 1 || result.PreviewFailedCount != 0 {
+		t.Fatalf("retry sync result = %#v", result)
+	}
+	broken, err = recordByDate(db, "2024-09-26")
+	if err != nil {
+		t.Fatalf("recordByDate() after retry error: %v", err)
+	}
+	if broken.PreviewPath == "" || broken.PreviewError != "" {
+		t.Fatalf("retried record = %#v", broken)
+	}
+	plan, err = prepareArchiveSync(db, "KEY", now)
+	if err != nil || !plan.AlreadyUpToDate {
+		t.Fatalf("plan after successful retry = %#v, %v", plan, err)
+	}
+}
+
+func TestSyncAPODItem_LocalCacheFailureIsFatal(t *testing.T) {
+	paths := AppPaths{PreviewDir: filepath.Join(t.TempDir(), "missing")}
+	db, err := openLibrary(filepath.Join(t.TempDir(), "astrowall.db"))
+	if err != nil {
+		t.Fatalf("openLibrary() error: %v", err)
+	}
+	defer db.Close()
+
+	_, err = syncAPODItem(db, paths, APODResponse{
+		Date: "2024-09-27", Title: "No cache", MediaType: "image", URL: "https://example.com/image.jpg",
+	}, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "creating temporary image") {
+		t.Fatalf("syncAPODItem() error = %v", err)
+	}
+	if count, countErr := apodCount(db); countErr != nil || count != 0 {
+		t.Fatalf("apodCount() = %d, %v; want 0, nil", count, countErr)
 	}
 }
 

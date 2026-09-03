@@ -18,6 +18,7 @@ type APODRecord struct {
 	ThumbnailURL string
 	Copyright    string
 	PreviewPath  string
+	PreviewError string
 	HDPath       string
 	Favorite     bool
 	FetchedAt    time.Time
@@ -58,6 +59,7 @@ CREATE TABLE IF NOT EXISTS apods (
 	thumbnail_url TEXT NOT NULL DEFAULT '',
 	copyright TEXT NOT NULL DEFAULT '',
 	preview_path TEXT NOT NULL DEFAULT '',
+	preview_error TEXT NOT NULL DEFAULT '',
 	hd_path TEXT NOT NULL DEFAULT '',
 	favorite INTEGER NOT NULL DEFAULT 0,
 	fetched_at TEXT NOT NULL
@@ -75,7 +77,66 @@ CREATE INDEX IF NOT EXISTS idx_apods_favorite ON apods(favorite, date DESC);
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("initializing sqlite schema: %w", err)
 	}
+	if err := ensureAPODPreviewErrorColumn(db); err != nil {
+		return err
+	}
 	return nil
+}
+
+func ensureAPODPreviewErrorColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(apods)`)
+	if err != nil {
+		return fmt.Errorf("inspecting sqlite schema: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return fmt.Errorf("reading sqlite schema: %w", err)
+		}
+		if name == "preview_error" {
+			return rows.Close()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("reading sqlite schema: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("closing sqlite schema query: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE apods ADD COLUMN preview_error TEXT NOT NULL DEFAULT ''`); err != nil {
+		hasColumn, inspectErr := apodsHaveColumn(db, "preview_error")
+		if inspectErr == nil && hasColumn {
+			return nil
+		}
+		return fmt.Errorf("adding preview error column: %w", err)
+	}
+	return nil
+}
+
+func apodsHaveColumn(db *sql.DB, wanted string) (bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(apods)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, err
+		}
+		if name == wanted {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func latestStoredDate(db *sql.DB) (string, error) {
@@ -93,8 +154,8 @@ func upsertAPOD(db *sql.DB, record APODRecord) error {
 	const query = `
 INSERT INTO apods (
 	date, title, description, media_type, url, hd_url, thumbnail_url, copyright,
-	preview_path, hd_path, favorite, fetched_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	preview_path, preview_error, hd_path, favorite, fetched_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(date) DO UPDATE SET
 	title = excluded.title,
 	description = excluded.description,
@@ -103,6 +164,11 @@ ON CONFLICT(date) DO UPDATE SET
 	hd_url = excluded.hd_url,
 	thumbnail_url = excluded.thumbnail_url,
 	copyright = excluded.copyright,
+	preview_path = CASE
+		WHEN excluded.preview_path != '' THEN excluded.preview_path
+		ELSE apods.preview_path
+	END,
+	preview_error = excluded.preview_error,
 	fetched_at = excluded.fetched_at
 `
 
@@ -117,6 +183,7 @@ ON CONFLICT(date) DO UPDATE SET
 		record.ThumbnailURL,
 		record.Copyright,
 		record.PreviewPath,
+		record.PreviewError,
 		record.HDPath,
 		boolToInt(record.Favorite),
 		record.FetchedAt.UTC().Format(time.RFC3339),
@@ -171,7 +238,7 @@ func recordByDate(db *sql.DB, date string) (APODRecord, error) {
 
 	err := db.QueryRow(`
 		SELECT date, title, description, media_type, url, hd_url, thumbnail_url, copyright,
-		       preview_path, hd_path, favorite, fetched_at
+		       preview_path, preview_error, hd_path, favorite, fetched_at
 		FROM apods
 		WHERE date = ?
 	`, date).Scan(
@@ -184,6 +251,7 @@ func recordByDate(db *sql.DB, date string) (APODRecord, error) {
 		&record.ThumbnailURL,
 		&record.Copyright,
 		&record.PreviewPath,
+		&record.PreviewError,
 		&record.HDPath,
 		&favorite,
 		&fetchedAt,
@@ -208,7 +276,7 @@ func listRecentAPODs(db *sql.DB, limit int) ([]APODRecord, error) {
 
 	rows, err := db.Query(`
 		SELECT date, title, description, media_type, url, hd_url, thumbnail_url, copyright,
-		       preview_path, hd_path, favorite, fetched_at
+		       preview_path, preview_error, hd_path, favorite, fetched_at
 		FROM apods
 		ORDER BY date DESC
 		LIMIT ?
@@ -234,6 +302,7 @@ func listRecentAPODs(db *sql.DB, limit int) ([]APODRecord, error) {
 			&record.ThumbnailURL,
 			&record.Copyright,
 			&record.PreviewPath,
+			&record.PreviewError,
 			&record.HDPath,
 			&favorite,
 			&fetchedAt,
@@ -261,7 +330,7 @@ func listRecentAPODs(db *sql.DB, limit int) ([]APODRecord, error) {
 func listFavoriteAPODs(db *sql.DB) ([]APODRecord, error) {
 	rows, err := db.Query(`
 		SELECT date, title, description, media_type, url, hd_url, thumbnail_url, copyright,
-		       preview_path, hd_path, favorite, fetched_at
+		       preview_path, preview_error, hd_path, favorite, fetched_at
 		FROM apods
 		WHERE favorite = 1
 		ORDER BY date DESC
@@ -287,6 +356,7 @@ func listFavoriteAPODs(db *sql.DB) ([]APODRecord, error) {
 			&record.ThumbnailURL,
 			&record.Copyright,
 			&record.PreviewPath,
+			&record.PreviewError,
 			&record.HDPath,
 			&favorite,
 			&fetchedAt,
@@ -308,6 +378,44 @@ func listFavoriteAPODs(db *sql.DB) ([]APODRecord, error) {
 		return nil, fmt.Errorf("iterating favorite APODs: %w", err)
 	}
 
+	return records, nil
+}
+
+func listAPODsWithPreviewErrors(db *sql.DB) ([]APODRecord, error) {
+	rows, err := db.Query(`
+		SELECT date, title, description, media_type, url, hd_url, thumbnail_url, copyright,
+		       preview_path, preview_error, hd_path, favorite, fetched_at
+		FROM apods
+		WHERE preview_error != ''
+		ORDER BY date
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("listing APOD preview errors: %w", err)
+	}
+	defer rows.Close()
+
+	var records []APODRecord
+	for rows.Next() {
+		var record APODRecord
+		var fetchedAt string
+		var favorite int
+		if err := rows.Scan(
+			&record.Date, &record.Title, &record.Description, &record.MediaType,
+			&record.URL, &record.HDURL, &record.ThumbnailURL, &record.Copyright,
+			&record.PreviewPath, &record.PreviewError, &record.HDPath, &favorite, &fetchedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scanning APOD preview error: %w", err)
+		}
+		record.Favorite = favorite == 1
+		record.FetchedAt, err = time.Parse(time.RFC3339, fetchedAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing fetched_at for %s: %w", record.Date, err)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating APOD preview errors: %w", err)
+	}
 	return records, nil
 }
 

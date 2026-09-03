@@ -21,6 +21,25 @@ const userAgent = "astrowall/1.0"
 
 var apodAPIBaseURL = "https://api.nasa.gov/planetary/apod"
 
+type localImageError struct {
+	err error
+}
+
+func (e localImageError) Error() string { return e.err.Error() }
+func (e localImageError) Unwrap() error { return e.err }
+
+type localImageWriter struct {
+	io.Writer
+}
+
+func (w localImageWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if err != nil {
+		return n, localImageError{err: err}
+	}
+	return n, nil
+}
+
 func httpGet(url string) (*http.Response, error) {
 	return httpGetContext(context.Background(), url)
 }
@@ -145,15 +164,15 @@ func downloadImageContext(ctx context.Context, url, targetPath string) error {
 
 	file, err := os.Create(targetPath)
 	if err != nil {
-		return fmt.Errorf("creating file: %w", err)
+		return localImageError{err: fmt.Errorf("creating file: %w", err)}
 	}
 
-	if _, err := io.Copy(file, resp.Body); err != nil {
+	if _, err := io.Copy(localImageWriter{Writer: file}, resp.Body); err != nil {
 		file.Close()
 		return fmt.Errorf("saving image: %w", err)
 	}
 	if err := file.Close(); err != nil {
-		return fmt.Errorf("closing image: %w", err)
+		return localImageError{err: fmt.Errorf("closing image: %w", err)}
 	}
 	return nil
 }
@@ -161,7 +180,7 @@ func downloadImageContext(ctx context.Context, url, targetPath string) error {
 func downloadImageAtomicContext(ctx context.Context, url, targetPath string) error {
 	temp, err := os.CreateTemp(filepath.Dir(targetPath), ".astrowall-download-*")
 	if err != nil {
-		return fmt.Errorf("creating temporary image: %w", err)
+		return localImageError{err: fmt.Errorf("creating temporary image: %w", err)}
 	}
 	tempPath := temp.Name()
 	temp.Close()
@@ -171,7 +190,7 @@ func downloadImageAtomicContext(ctx context.Context, url, targetPath string) err
 		return err
 	}
 	if err := os.Rename(tempPath, targetPath); err != nil {
-		return fmt.Errorf("installing image: %w", err)
+		return localImageError{err: fmt.Errorf("installing image: %w", err)}
 	}
 	return nil
 }

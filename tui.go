@@ -34,10 +34,14 @@ func (i apodListItem) Title() string {
 }
 
 func (i apodListItem) Description() string {
-	if i.record.Favorite {
-		return i.record.Date + " ★"
+	description := i.record.Date
+	if i.record.PreviewError != "" {
+		description += " • preview error"
 	}
-	return i.record.Date
+	if i.record.Favorite {
+		description += " ★"
+	}
+	return description
 }
 
 type wallpaperAppliedMsg struct {
@@ -66,9 +70,10 @@ type archiveSyncPreparedMsg struct {
 }
 
 type archiveItemSyncedMsg struct {
-	date      string
-	previewed bool
-	err       error
+	date         string
+	previewed    bool
+	previewError string
+	err          error
 }
 
 type nativeImagePreparedMsg struct {
@@ -142,6 +147,7 @@ type tuiModel struct {
 	syncTotal        int
 	syncCompleted    int
 	syncPreviewed    int
+	syncFailed       int
 	syncNow          time.Time
 	syncContext      context.Context
 	cancelSync       context.CancelFunc
@@ -514,6 +520,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.previewed {
 			m.syncPreviewed++
 		}
+		if msg.previewError != "" {
+			m.syncFailed++
+		}
 		if err := m.reloadRecords(); err != nil {
 			m.syncing = false
 			m.syncItems = nil
@@ -523,7 +532,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncItems = m.syncItems[1:]
 		if len(m.syncItems) == 0 {
 			m.syncing = false
-			m.status = fmt.Sprintf("Synced %d APODs and cached %d previews", m.syncCompleted, m.syncPreviewed)
+			m.status = fmt.Sprintf("Synced %d APODs, cached %d previews, %d preview errors", m.syncCompleted, m.syncPreviewed, m.syncFailed)
 			return m, m.requestNativeImage()
 		}
 		m.status = fmt.Sprintf("Syncing APOD %d/%d…", m.syncCompleted+1, m.syncTotal)
@@ -988,6 +997,9 @@ func (m tuiModel) detailHeader(record APODRecord) []string {
 	if record.Favorite {
 		parts = append(parts, "Favorite: yes")
 	}
+	if record.PreviewError != "" {
+		parts = append(parts, "Preview error: "+record.PreviewError)
+	}
 	return parts
 }
 
@@ -1087,8 +1099,8 @@ func (m *tuiModel) startArchiveSync() tea.Cmd {
 
 func (m tuiModel) syncArchiveItemCmd(item APODResponse) tea.Cmd {
 	return m.trackCmd(func() tea.Msg {
-		previewed, err := syncAPODItemContext(m.syncContext, m.db, m.paths, item, m.syncNow)
-		return archiveItemSyncedMsg{date: item.Date, previewed: previewed, err: err}
+		result, err := syncAPODItemContext(m.syncContext, m.db, m.paths, item, m.syncNow)
+		return archiveItemSyncedMsg{date: item.Date, previewed: result.Previewed, previewError: result.PreviewError, err: err}
 	})
 }
 
