@@ -114,6 +114,7 @@ Current behavior:
 
 - dashboard header: total local APOD count and favorites count
 - wide terminals: separate `Recent APODs` and `Favorites` panes beside the detail view
+- `b`: switch the primary pane between the latest 30 Recent items and the full local Archive (loaded on demand); searches and selection stay independent
 - compact terminals: the active list beside the detail view; narrow terminals stack the active list above it
 - very small terminals: a focused list view; `Tab` still switches between Recent and Favorites
 - right pane: the selected item's date, type, cache status, and description
@@ -123,7 +124,7 @@ Current behavior:
 - `/`: search the active pane by title, date, or description
 - `Enter`: apply the current search
 - `Esc`: cancel search editing or clear an applied search
-- `Tab` / `Shift+Tab`: switch between `Recent APODs` and `Favorites`
+- `Tab` / `Shift+Tab`: switch between the primary pane (Recent or Archive) and Favorites
 - `q`: quit
 - `f`: favorite or unfavorite the selected item
 - `Enter`: fetch the selected day's image and set it as wallpaper

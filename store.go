@@ -273,7 +273,15 @@ func listRecentAPODs(db *sql.DB, limit int) ([]APODRecord, error) {
 	if limit <= 0 {
 		limit = 30
 	}
+	return listAPODs(db, limit)
+}
 
+func listAllAPODs(db *sql.DB) ([]APODRecord, error) {
+	return listAPODs(db, -1)
+}
+
+// SQLite treats LIMIT -1 as unlimited; the archive is loaded on demand.
+func listAPODs(db *sql.DB, limit int) ([]APODRecord, error) {
 	rows, err := db.Query(`
 		SELECT date, title, description, media_type, url, hd_url, thumbnail_url, copyright,
 		       preview_path, preview_error, hd_path, favorite, fetched_at
@@ -282,7 +290,7 @@ func listRecentAPODs(db *sql.DB, limit int) ([]APODRecord, error) {
 		LIMIT ?
 	`, limit)
 	if err != nil {
-		return nil, fmt.Errorf("listing recent APODs: %w", err)
+		return nil, fmt.Errorf("listing APODs: %w", err)
 	}
 	defer rows.Close()
 
@@ -307,7 +315,7 @@ func listRecentAPODs(db *sql.DB, limit int) ([]APODRecord, error) {
 			&favorite,
 			&fetchedAt,
 		); err != nil {
-			return nil, fmt.Errorf("scanning recent APODs: %w", err)
+			return nil, fmt.Errorf("scanning APODs: %w", err)
 		}
 
 		parsed, err := time.Parse(time.RFC3339, fetchedAt)
@@ -321,7 +329,7 @@ func listRecentAPODs(db *sql.DB, limit int) ([]APODRecord, error) {
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating recent APODs: %w", err)
+		return nil, fmt.Errorf("iterating APODs: %w", err)
 	}
 
 	return records, nil

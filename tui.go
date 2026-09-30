@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -77,6 +78,11 @@ type archiveItemSyncedMsg struct {
 	err          error
 }
 
+type archiveLoadedMsg struct {
+	records []APODRecord
+	err     error
+}
+
 type nativeImagePreparedMsg struct {
 	image nativeImage
 	key   string
@@ -125,10 +131,15 @@ type tuiModel struct {
 	db               *sql.DB
 	paths            AppPaths
 	recentList       list.Model
+	archiveList      list.Model
 	favoriteList     list.Model
 	detail           viewport.Model
 	recentRecords    []APODRecord
+	archiveRecords   []APODRecord
 	favoriteRecords  []APODRecord
+	archiveMode      bool
+	archiveLoading   bool
+	archiveLoaded    bool
 	apiKey           string
 	apiKeySource     apiKeySource
 	apiKeyInput      textinput.Model
@@ -176,7 +187,7 @@ type tuiModel struct {
 	cancelANSI       context.CancelFunc
 	nativeFallback   string
 	activePane       activePane
-	searchOriginal   [2]string
+	searchOriginal   [3]string
 	spinner          spinner.Model
 	listStyle        lipgloss.Style
 	detailStyle      lipgloss.Style
@@ -264,6 +275,7 @@ func newListModel(title string, records []APODRecord) list.Model {
 
 func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tuiModel {
 	recentList := newListModel("Recent APODs", recentRecords)
+	archiveList := newListModel("Archive", nil)
 	favoriteList := newListModel("Favorites", favoriteRecords)
 	detail := viewport.New()
 	detail.SetContent("No APODs loaded.")
@@ -278,6 +290,7 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 
 	m := tuiModel{
 		recentList:      recentList,
+		archiveList:     archiveList,
 		favoriteList:    favoriteList,
 		detail:          detail,
 		recentRecords:   recentRecords,
@@ -320,7 +333,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.requestNativeImage()
 
 	case spinner.TickMsg:
-		if !m.loading && !m.syncing {
+		if !m.loading && !m.syncing && !m.archiveLoading {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -397,7 +410,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					activeList.FilterInput.Blur()
 				}
 				m.setActiveList(activeList)
-				m.searchOriginal[m.activePane] = ""
+				m.searchOriginal[m.searchIndex()] = ""
 				m.updatePaneTitles()
 				m.refreshDetail(true)
 				return m, m.requestNativeImage()
@@ -413,6 +426,37 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if isHelpToggleKey(msg) {
 			m.showHelp = true
 			return m, m.clearNativeImage()
+		}
+		if msg.String() == "b" {
+			if m.archiveMode {
+				m.archiveMode = false
+				m.activePane = recentPane
+				m.updatePaneTitles()
+				m.refreshDetail(true)
+				m.status = "Showing recent APODs"
+				return m, m.requestNativeImage()
+			}
+			if m.archiveLoading {
+				return m, nil
+			}
+			if !m.archiveLoaded {
+				if m.db == nil {
+					m.status = "Archive unavailable without a local library"
+					return m, nil
+				}
+				m.archiveLoading = true
+				m.status = "Loading the full APOD archive…"
+				return m, tea.Batch(spinnerTickCmd(m.spinner), m.trackCmd(func() tea.Msg {
+					records, err := listAllAPODs(m.db)
+					return archiveLoadedMsg{records: records, err: err}
+				}))
+			}
+			m.archiveMode = true
+			m.activePane = recentPane
+			m.updatePaneTitles()
+			m.refreshDetail(true)
+			m.status = "Browsing the full APOD archive"
+			return m, m.requestNativeImage()
 		}
 
 		if isNextPaneKey(msg) {
@@ -458,7 +502,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.requestNativeImage()
 			}
 		case "f":
-			if m.loading {
+			if m.loading || m.archiveLoading {
 				return m, nil
 			}
 			record := m.selectedRecord()
@@ -574,6 +618,28 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.syncStatus = fmt.Sprintf("Syncing APOD %d/%d…", m.syncCompleted+1, m.syncTotal)
 		return m, tea.Batch(m.syncArchiveItemCmd(m.syncItems[0]), m.requestNativeImage())
+
+	case archiveLoadedMsg:
+		m.archiveLoading = false
+		if msg.err != nil {
+			m.status = fmt.Sprintf("Archive load failed: %v", msg.err)
+			return m, nil
+		}
+		m.archiveRecords = msg.records
+		for _, record := range m.recentRecords {
+			m.insertArchiveRecord(record)
+		}
+		if m.libraryCount < len(m.archiveRecords) {
+			m.libraryCount = len(m.archiveRecords)
+		}
+		m.archiveLoaded = true
+		m.archiveMode = true
+		m.activePane = recentPane
+		m.syncSingleList(&m.archiveList, m.archiveRecords)
+		m.updatePaneTitles()
+		m.refreshDetail(true)
+		m.status = fmt.Sprintf("Browsing %d stored APODs", len(m.archiveRecords))
+		return m, m.requestNativeImage()
 
 	case favoriteToggledMsg:
 		if msg.err != nil {
@@ -788,7 +854,7 @@ func (m tuiModel) View() tea.View {
 		leftColumn := m.renderListPane(m.activePane, m.activeList())
 		if !m.compactLayout() {
 			leftColumn = lipgloss.JoinVertical(lipgloss.Left,
-				m.renderListPane(recentPane, m.recentList),
+				m.renderListPane(recentPane, m.primaryList()),
 				m.renderListPane(favoritesPane, m.favoriteList),
 			)
 		}
@@ -802,7 +868,7 @@ func (m tuiModel) View() tea.View {
 	}
 
 	status := m.status
-	if m.loading {
+	if m.loading || m.archiveLoading {
 		status = fmt.Sprintf("%s %s", m.spinner.View(), status)
 	}
 	if m.showHelp {
@@ -868,6 +934,7 @@ func (m *tuiModel) resize() {
 		innerWidth := max(1, m.width-horizontalOuterInset*2-listHorizontalFrame-1)
 		innerHeight := max(1, m.height-headerLineCount-1-listVerticalFrame)
 		m.recentList.SetSize(innerWidth, innerHeight)
+		m.archiveList.SetSize(innerWidth, innerHeight)
 		m.favoriteList.SetSize(innerWidth, innerHeight)
 		m.detail.SetWidth(max(1, m.width-horizontalOuterInset*2-detailHorizontalFrame))
 		m.detail.SetHeight(max(1, m.height-headerLineCount-1-detailVerticalFrame))
@@ -886,6 +953,7 @@ func (m *tuiModel) resize() {
 		listHeight := max(1, listOuterHeight-listVerticalFrame)
 		detailHeight := max(1, contentHeight-listOuterHeight-detailVerticalFrame)
 		m.recentList.SetSize(listInnerWidth, listHeight)
+		m.archiveList.SetSize(listInnerWidth, listHeight)
 		m.favoriteList.SetSize(listInnerWidth, listHeight)
 		m.detail.SetWidth(detailInnerWidth)
 		m.detail.SetHeight(detailHeight)
@@ -915,6 +983,7 @@ func (m *tuiModel) resize() {
 	detailInnerHeight := max(1, contentHeight-detailVerticalFrame)
 
 	m.recentList.SetSize(listInnerWidth, recentInnerHeight)
+	m.archiveList.SetSize(listInnerWidth, recentInnerHeight)
 	m.favoriteList.SetSize(listInnerWidth, favoriteInnerHeight)
 	m.detail.SetWidth(detailInnerWidth)
 	m.detail.SetHeight(detailInnerHeight)
@@ -973,6 +1042,9 @@ func (m tuiModel) emptyDetailMessage() string {
 	}
 	if m.activePane == favoritesPane {
 		return "No favorites yet. Select an APOD in Recent and press f to save it here."
+	}
+	if m.archiveMode {
+		return "No APODs in the archive yet. New entries appear here as they sync."
 	}
 	return "Your library is empty. Checking NASA for new APODs…"
 }
@@ -1353,6 +1425,7 @@ func (m tuiModel) cancelBackgroundSync() {
 
 func (m *tuiModel) reloadRecords() error {
 	recentDate := selectedListDate(m.recentList)
+	archiveDate := selectedListDate(m.archiveList)
 	favoriteDate := selectedListDate(m.favoriteList)
 
 	recent, err := listRecentAPODs(m.db, 30)
@@ -1365,12 +1438,18 @@ func (m *tuiModel) reloadRecords() error {
 	}
 	m.recentRecords = recent
 	m.favoriteRecords = favorites
+	if m.archiveLoaded {
+		for _, record := range recent {
+			m.insertArchiveRecord(record)
+		}
+	}
 	m.libraryCount, err = apodCount(m.db)
 	if err != nil {
 		return err
 	}
 	m.syncListItems()
 	selectListDate(&m.recentList, recentDate)
+	selectListDate(&m.archiveList, archiveDate)
 	selectListDate(&m.favoriteList, favoriteDate)
 	if m.ready {
 		m.resize()
@@ -1403,8 +1482,26 @@ func selectListDate(listModel *list.Model, date string) {
 
 func (m *tuiModel) syncListItems() {
 	m.syncSingleList(&m.recentList, m.recentRecords)
+	if m.archiveLoaded {
+		m.syncSingleList(&m.archiveList, m.archiveRecords)
+	}
 	m.syncSingleList(&m.favoriteList, m.favoriteRecords)
 	m.updatePaneTitles()
+}
+
+// New dates can arrive while the initial archive query runs. Insert recent
+// records into the sorted archive without rebuilding its full list each time.
+func (m *tuiModel) insertArchiveRecord(record APODRecord) {
+	index := sort.Search(len(m.archiveRecords), func(i int) bool {
+		return m.archiveRecords[i].Date <= record.Date
+	})
+	if index < len(m.archiveRecords) && m.archiveRecords[index].Date == record.Date {
+		m.archiveRecords[index] = record
+		return
+	}
+	m.archiveRecords = append(m.archiveRecords, APODRecord{})
+	copy(m.archiveRecords[index+1:], m.archiveRecords[index:])
+	m.archiveRecords[index] = record
 }
 
 func applyWallpaperCmd(db *sql.DB, paths AppPaths, record APODRecord, apiKey string) tea.Cmd {
@@ -1506,6 +1603,13 @@ func (m tuiModel) activeList() list.Model {
 	if m.activePane == favoritesPane {
 		return m.favoriteList
 	}
+	return m.primaryList()
+}
+
+func (m tuiModel) primaryList() list.Model {
+	if m.archiveMode {
+		return m.archiveList
+	}
 	return m.recentList
 }
 
@@ -1514,7 +1618,21 @@ func (m *tuiModel) setActiveList(updated list.Model) {
 		m.favoriteList = updated
 		return
 	}
+	if m.archiveMode {
+		m.archiveList = updated
+		return
+	}
 	m.recentList = updated
+}
+
+func (m tuiModel) searchIndex() int {
+	if m.activePane == favoritesPane {
+		return 1
+	}
+	if m.archiveMode {
+		return 2
+	}
+	return 0
 }
 
 func (m *tuiModel) updateSearch(msg tea.Msg) tea.Cmd {
@@ -1536,7 +1654,7 @@ func (m *tuiModel) updateSearch(msg tea.Msg) tea.Cmd {
 
 func (m *tuiModel) startSearch() tea.Cmd {
 	activeList := m.activeList()
-	m.searchOriginal[m.activePane] = activeList.FilterValue()
+	m.searchOriginal[m.searchIndex()] = activeList.FilterValue()
 	activeList.SetFilterText(activeList.FilterValue())
 	activeList.SetFilterState(list.Filtering)
 	activeList.FilterInput.Focus()
@@ -1546,14 +1664,14 @@ func (m *tuiModel) startSearch() tea.Cmd {
 
 func (m *tuiModel) cancelSearch() tea.Cmd {
 	activeList := m.activeList()
-	original := m.searchOriginal[m.activePane]
+	original := m.searchOriginal[m.searchIndex()]
 	if original == "" {
 		activeList.ResetFilter()
 	} else {
 		activeList.SetFilterText(original)
 		activeList.FilterInput.Blur()
 	}
-	m.searchOriginal[m.activePane] = ""
+	m.searchOriginal[m.searchIndex()] = ""
 	m.setActiveList(activeList)
 	m.updatePaneTitles()
 	m.refreshDetail(true)
@@ -1615,6 +1733,7 @@ func limitRenderedPane(content string, height int) string {
 
 func (m *tuiModel) updatePaneTitles() {
 	m.recentList.Title = m.paneTitle("Recent APODs", recentPane, m.recentList)
+	m.archiveList.Title = m.paneTitle("Archive", recentPane, m.archiveList)
 	m.favoriteList.Title = m.paneTitle("Favorites", favoritesPane, m.favoriteList)
 }
 
@@ -1633,6 +1752,9 @@ func (m tuiModel) activePaneLabel() string {
 	if m.activePane == favoritesPane {
 		return "Favorites"
 	}
+	if m.archiveMode {
+		return "Archive"
+	}
 	return "Recent APODs"
 }
 
@@ -1642,12 +1764,22 @@ func (m *tuiModel) updateFavoriteInRecent(date string, favorite bool) {
 			m.recentRecords[i].Favorite = favorite
 		}
 	}
+	for i := range m.archiveRecords {
+		if m.archiveRecords[i].Date == date {
+			m.archiveRecords[i].Favorite = favorite
+		}
+	}
 }
 
 func (m *tuiModel) updateHDPathInRecords(date, path string) {
 	for i := range m.recentRecords {
 		if m.recentRecords[i].Date == date {
 			m.recentRecords[i].HDPath = path
+		}
+	}
+	for i := range m.archiveRecords {
+		if m.archiveRecords[i].Date == date {
+			m.archiveRecords[i].HDPath = path
 		}
 	}
 	for i := range m.favoriteRecords {
@@ -1720,6 +1852,7 @@ func (m tuiModel) renderHelpView() string {
 		"  Tab                Switch to the next pane",
 		"  Shift+Tab          Switch to the previous pane",
 		"  /                  Search the active pane",
+		"  b                  Toggle Recent and full Archive",
 		"  Esc                Clear an applied search",
 		"",
 		favoriteText.Render("Actions"),

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -1073,6 +1074,153 @@ func TestTUIHeaderCountsEntireLibraryAndUpdatesDuringSync(t *testing.T) {
 	if got := ansi.Strip(m.renderDashboardHeader(76)); !strings.Contains(got, "LIBRARY 33") {
 		t.Fatalf("header after sync = %q, want 33 items", got)
 	}
+}
+
+func TestTUIArchiveBrowsesOlderEntriesWithoutLosingRecentSearch(t *testing.T) {
+	db, err := openLibrary(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	base := time.Date(2024, 9, 27, 0, 0, 0, 0, time.UTC)
+	for i := range 36 {
+		date := base.AddDate(0, 0, -i).Format("2006-01-02")
+		title := "Regular"
+		if i == 35 {
+			title = "Ancient Nebula"
+		}
+		if err := upsertAPOD(db, APODRecord{Date: date, Title: title, Description: "A distant nebula", PreviewPath: "/preview.jpg", FetchedAt: base}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := newTUIModelFromLibrary(db, AppPaths{}, "KEY", imageProtocolWezTerm, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(tuiModel)
+	if len(m.recentRecords) != 30 || m.archiveLoaded {
+		t.Fatal("archive loaded eagerly or Recent did not retain 30 records")
+	}
+	m = typeSearchQuery(t, m, "Ancient")
+	if m.selectedRecord().Date != "" {
+		t.Fatal("older record should not appear in Recent search")
+	}
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "b", Code: 'b'})
+	m = updated.(tuiModel)
+	if cmd == nil || !m.archiveLoading || m.archiveMode {
+		t.Fatal("archive must load on demand without blocking the current pane")
+	}
+	records, err := listAllAPODs(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, _ = m.Update(archiveLoadedMsg{records: records})
+	m = updated.(tuiModel)
+	if !m.archiveMode || m.archiveLoading || len(m.archiveRecords) != 36 || m.archiveList.Title != "Archive • active" {
+		t.Fatalf("archive state: loaded=%t count=%d title=%q", m.archiveLoaded, len(m.archiveRecords), m.archiveList.Title)
+	}
+	m = typeSearchQuery(t, m, "Ancient")
+	wantDate := base.AddDate(0, 0, -35).Format("2006-01-02")
+	if m.selectedRecord().Date != wantDate || m.nativeRequest == "" {
+		t.Fatalf("older record not selected/previewed: date=%q native=%q", m.selectedRecord().Date, m.nativeRequest)
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "b", Code: 'b'})
+	m = updated.(tuiModel)
+	if m.archiveMode || m.recentList.FilterValue() != "Ancient" || m.selectedRecord().Date != "" {
+		t.Fatal("Recent search not restored on toggle")
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "b", Code: 'b'})
+	m = updated.(tuiModel)
+	if m.selectedRecord().Date != wantDate || m.archiveList.FilterValue() != "Ancient" {
+		t.Fatal("Archive search and selection not restored on toggle")
+	}
+}
+
+func TestTUIArchiveKeepsOlderFavoritesAndSelectionAcrossSync(t *testing.T) {
+	db, err := openLibrary(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	base := time.Date(2024, 9, 27, 0, 0, 0, 0, time.UTC)
+	for i := range 34 {
+		if err := upsertAPOD(db, APODRecord{Date: base.AddDate(0, 0, -i).Format("2006-01-02"), Title: "APOD", FetchedAt: base}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := newTUIModelFromLibrary(db, AppPaths{}, "KEY", imageProtocolANSI, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := m.Update(archiveLoadedMsg{records: mustListAllAPODs(t, db)})
+	m = updated.(tuiModel)
+	oldDate := base.AddDate(0, 0, -33).Format("2006-01-02")
+	selectListDate(&m.archiveList, oldDate)
+	if m.selectedRecord().Date != oldDate {
+		t.Fatalf("selected %q instead of older record", m.selectedRecord().Date)
+	}
+	msg := toggleFavoriteCmd(db, oldDate)().(favoriteToggledMsg)
+	if msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	updated, _ = m.Update(msg)
+	m = updated.(tuiModel)
+	if !m.selectedRecord().Favorite || len(m.favoriteRecords) != 1 || m.favoriteRecords[0].Date != oldDate {
+		t.Fatalf("older favorite not reflected in archive and Favorites: selected=%#v favorites=%#v", m.selectedRecord(), m.favoriteRecords)
+	}
+	newDate := base.AddDate(0, 0, 1).Format("2006-01-02")
+	if err := upsertAPOD(db, APODRecord{Date: newDate, Title: "New", FetchedAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.reloadRecords(); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.archiveRecords) != 35 || m.archiveRecords[0].Date != newDate || m.selectedRecord().Date != oldDate || !m.selectedRecord().Favorite {
+		t.Fatalf("sync lost archive selection or favorite: count=%d selected=%#v", len(m.archiveRecords), m.selectedRecord())
+	}
+}
+
+func TestTUIArchiveSearchAndSelectionSurviveFavoriteRefresh(t *testing.T) {
+	db, err := openLibrary(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, record := range []APODRecord{
+		{Date: "2024-09-27", Title: "Nebula One", FetchedAt: time.Now()},
+		{Date: "2024-09-26", Title: "Nebula Two", FetchedAt: time.Now()},
+		{Date: "2024-09-25", Title: "Moon", FetchedAt: time.Now()},
+	} {
+		if err := upsertAPOD(db, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := newTUIModelFromLibrary(db, AppPaths{}, "KEY", imageProtocolANSI, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(archiveLoadedMsg{records: mustListAllAPODs(t, db)})
+	m = updated.(tuiModel)
+	m = typeSearchQuery(t, m, "Nebula")
+	selectListDate(&m.archiveList, "2024-09-26")
+	msg := toggleFavoriteCmd(db, "2024-09-26")().(favoriteToggledMsg)
+	updated, _ = m.Update(msg)
+	m = updated.(tuiModel)
+	if m.selectedRecord().Date != "2024-09-26" || m.archiveList.FilterValue() != "Nebula" || len(m.archiveList.VisibleItems()) != 2 {
+		t.Fatalf("favorite refresh lost archive state: date=%q query=%q visible=%d", m.selectedRecord().Date, m.archiveList.FilterValue(), len(m.archiveList.VisibleItems()))
+	}
+}
+
+func mustListAllAPODs(t *testing.T, db *sql.DB) []APODRecord {
+	t.Helper()
+	records, err := listAllAPODs(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return records
 }
 
 func TestTUIKeepsActionFeedbackVisibleWhileSyncProgresses(t *testing.T) {

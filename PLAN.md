@@ -41,9 +41,12 @@ The desired direction is a **rich astronomy dashboard** with polished, usable vi
 - [x] Verify preview geometry, lifecycle, rapid navigation, and resize with tests and project checks.
 - [x] Collect visual feedback in direct WezTerm.
 
-### 5. Full-library browsing — pending
+### 5. Full-library browsing — complete
 
-Expose stored entries older than the newest 30, with useful search/navigation and predictable loading. Verify selection, filtering, favorites, and cache reuse.
+- [x] Load the complete SQLite archive on demand with `b`; keep Recent limited to 30 for startup.
+- [x] Preserve independent Recent, Archive, and Favorites searches and list selections while switching; keep new sync items and favorite changes visible in the archive.
+- [x] Verify older non-favorites, filtering, toggling favorites, background sync, and native preview request for archived items.
+- [x] Collect feedback on Archive browsing in WezTerm.
 
 ## Later ideas
 
@@ -64,3 +67,5 @@ Milestone 2 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and 
 Milestone 3 evidence: model tests exercise wide, compact, stacked, and list-only layouts, selection and search across pane switches, bounds, and native-image invalidation after resizing. User reviewed the responsive layout in WezTerm and approved it.
 
 Milestone 4 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `git diff --check` passed. Tests cover letterboxing, asynchronous preparation, cached reuse, stale generation rejection, resize, and fallback. User reviewed the previews in WezTerm and approved them.
+
+Milestone 5 evidence: SQLite-backed model tests cover older entries beyond the Recent 30, on-demand loading, independent searches, favorites, preserved selection, new sync items, and WezTerm preview requests. User reviewed Archive browsing in WezTerm and approved it.
