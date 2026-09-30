@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1358,6 +1360,349 @@ func TestTUIModelReportsEmptyBackgroundSync(t *testing.T) {
 	}
 	if m.syncStatus != "Library sync returned no APODs" {
 		t.Fatalf("sync status = %q", m.syncStatus)
+	}
+}
+
+func TestTUIManualSyncQueuesRefreshDuringCurrentRun(t *testing.T) {
+	db, err := openLibrary(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	m := newTUIModel(nil, nil, "KEY")
+	m.db = db
+	m.syncContext, m.cancelSync = context.WithCancel(t.Context())
+	m.commands = &commandTracker{}
+	m.syncStarted = true
+	m.syncTotal, m.syncCompleted, m.syncPreviewed, m.syncFailed = 7, 7, 3, 2
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "s", Code: 's'})
+	m = updated.(tuiModel)
+	if cmd == nil || !m.syncing || m.syncTotal != 0 || m.syncCompleted != 0 || m.syncPreviewed != 0 || m.syncFailed != 0 {
+		t.Fatalf("manual sync did not start cleanly: syncing=%t counts=%d/%d/%d/%d", m.syncing, m.syncTotal, m.syncCompleted, m.syncPreviewed, m.syncFailed)
+	}
+	updated, cmd = m.Update(tea.KeyPressMsg{Text: "s", Code: 's'})
+	m = updated.(tuiModel)
+	if cmd != nil || !m.syncQueued || !strings.Contains(m.status, "queued") {
+		t.Fatalf("overlapping refresh scheduled: cmd=%v status=%q", cmd, m.status)
+	}
+	updated, cmd = m.Update(archiveSyncPreparedMsg{plan: archiveSyncPlan{AlreadyUpToDate: true}})
+	m = updated.(tuiModel)
+	if !m.syncing || cmd == nil || m.syncQueued || !strings.Contains(m.syncStatus, "Checking") {
+		t.Fatalf("queued sync did not start: syncing=%t status=%q cmd=%v", m.syncing, m.syncStatus, cmd)
+	}
+	updated, cmd = m.Update(archiveSyncPreparedMsg{plan: archiveSyncPlan{AlreadyUpToDate: true}})
+	m = updated.(tuiModel)
+	if cmd != nil || m.syncing || !strings.Contains(m.syncStatus, "up to date") {
+		t.Fatalf("final no-op sync: syncing=%t status=%q", m.syncing, m.syncStatus)
+	}
+	updated, cmd = m.Update(tea.KeyPressMsg{Text: "s", Code: 's'})
+	m = updated.(tuiModel)
+	if cmd == nil || !m.syncing {
+		t.Fatal("could not refresh again after completed runs")
+	}
+}
+
+func TestTUIRetrySelectedOlderPreviewReusesExistingSyncAndKeepsSelection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("preview image"))
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	previewDir := filepath.Join(root, "previews")
+	if err := os.Mkdir(previewDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openLibrary(filepath.Join(root, "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	base := time.Date(2024, 9, 27, 0, 0, 0, 0, time.UTC)
+	for i := range 32 {
+		record := APODRecord{Date: base.AddDate(0, 0, -i).Format("2006-01-02"), Title: "APOD", FetchedAt: base}
+		if i == 31 {
+			record.PreviewError = "temporary failure"
+			record.URL = server.URL + "/preview.jpg"
+		}
+		if err := upsertAPOD(db, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := newTUIModelFromLibrary(db, AppPaths{PreviewDir: previewDir}, "KEY", imageProtocolANSI, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.syncing = false
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(archiveLoadedMsg{records: mustListAllAPODs(t, db)})
+	m = updated.(tuiModel)
+	oldDate := base.AddDate(0, 0, -31).Format("2006-01-02")
+	selectListDate(&m.archiveList, oldDate)
+	m.refreshDetail(true)
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "p", Code: 'p'})
+	m = updated.(tuiModel)
+	if cmd == nil || !m.retryingPreview {
+		t.Fatal("selected preview retry did not start")
+	}
+	updated, blocked := m.Update(tea.KeyPressMsg{Text: "s", Code: 's'})
+	m = updated.(tuiModel)
+	if blocked != nil || m.syncing || !m.syncQueued {
+		t.Fatal("overlapping library sync started during preview retry")
+	}
+	var retry previewRetriedMsg
+	for _, run := range cmd().(tea.BatchMsg) {
+		if msg, ok := run().(previewRetriedMsg); ok {
+			retry = msg
+		}
+	}
+	if retry.err != nil || retry.date != oldDate {
+		t.Fatalf("retry command result: %#v", retry)
+	}
+	updated, queued := m.Update(retry)
+	m = updated.(tuiModel)
+	if queued == nil || !m.syncing || m.syncQueued {
+		t.Fatal("queued refresh did not start after preview retry")
+	}
+	if m.retryingPreview || m.selectedRecord().Date != oldDate || m.selectedRecord().PreviewError != "" || m.selectedRecord().PreviewPath == "" {
+		t.Fatalf("retry did not update older selection: %#v", m.selectedRecord())
+	}
+	if _, err := os.Stat(m.selectedRecord().PreviewPath); err != nil {
+		t.Fatalf("preview not cached: %v", err)
+	}
+	if !strings.Contains(m.status, "Preview refreshed") {
+		t.Fatalf("success status: %q", m.status)
+	}
+}
+
+func TestTUIRetryPreviewKeepsFailureAndRejectsStaleResult(t *testing.T) {
+	db, err := openLibrary(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	record := APODRecord{Date: "2024-09-27", Title: "Broken", MediaType: "image", URL: "http://127.0.0.1:1/missing.jpg", PreviewError: "download failed", FetchedAt: time.Now()}
+	if err := upsertAPOD(db, record); err != nil {
+		t.Fatal(err)
+	}
+	m := newTUIModel([]APODRecord{record}, nil, "KEY")
+	m.db = db
+	m.paths.PreviewDir = t.TempDir()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(previewRetriedMsg{date: record.Date})
+	m = updated.(tuiModel)
+	if m.status == "Preview ready for 2024-09-27" {
+		t.Fatal("stale retry changed status")
+	}
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "p", Code: 'p'})
+	m = updated.(tuiModel)
+	var retry previewRetriedMsg
+	for _, run := range cmd().(tea.BatchMsg) {
+		if msg, ok := run().(previewRetriedMsg); ok {
+			retry = msg
+		}
+	}
+	if retry.err != nil || retry.result.PreviewError == "" {
+		t.Fatalf("retry command result: %#v", retry)
+	}
+	updated, _ = m.Update(retry)
+	m = updated.(tuiModel)
+	if m.retryingPreview || m.selectedRecord().PreviewError == "" || !strings.Contains(m.status, "still unavailable") {
+		t.Fatalf("failed retry state: record=%#v status=%q", m.selectedRecord(), m.status)
+	}
+}
+
+func TestTUIRefreshPreviewReplacesCachedImageWithoutStoredError(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = fmt.Fprintf(w, "preview %d", requests)
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	previewDir := filepath.Join(root, "previews")
+	if err := os.Mkdir(previewDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openLibrary(filepath.Join(root, "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	date := "2024-09-27"
+	path := filepath.Join(previewDir, date+".jpg")
+	if err := os.WriteFile(path, []byte("old preview"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record := APODRecord{Date: date, Title: "Cached", MediaType: "image", URL: server.URL + "/preview.jpg", PreviewPath: path, FetchedAt: time.Now()}
+	if err := upsertAPOD(db, record); err != nil {
+		t.Fatal(err)
+	}
+	m := newTUIModel([]APODRecord{record}, nil, "KEY")
+	m.db = db
+	m.paths.PreviewDir = previewDir
+	m.imageProtocol = imageProtocolWezTerm
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	m.cacheANSIPreview(m.ansiPreviewKey(), ansiPreviewResult{preview: "old cached ANSI"})
+	m.nativeImage = nativeImage{id: 42, path: path, protocol: imageProtocolWezTerm, width: m.previewArea.width, height: m.previewArea.height}
+	m.nativeTarget = m.nativeImageKey()
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "p", Code: 'p'})
+	m = updated.(tuiModel)
+	if cmd == nil || !m.retryingPreview {
+		t.Fatalf("p did not start refresh: status=%q", m.status)
+	}
+	var retry previewRetriedMsg
+	for _, run := range cmd().(tea.BatchMsg) {
+		if msg, ok := run().(previewRetriedMsg); ok {
+			retry = msg
+		}
+	}
+	if retry.err != nil || !retry.result.Previewed || requests != 1 {
+		t.Fatalf("cached image not downloaded again: result=%#v requests=%d", retry, requests)
+	}
+	updated, _ = m.Update(retry)
+	m = updated.(tuiModel)
+	contents, err := os.ReadFile(path)
+	if err != nil || string(contents) != "preview 1" {
+		t.Fatalf("preview contents=%q err=%v", contents, err)
+	}
+	if m.nativeImage.id != 0 || m.nativeRequest == "" || len(m.ansiCache) != 0 || !strings.Contains(m.status, "Preview refreshed") {
+		t.Fatalf("stale preview still active: native=%d request=%q cache=%d status=%q", m.nativeImage.id, m.nativeRequest, len(m.ansiCache), m.status)
+	}
+}
+
+func TestTUIRefreshPreviewReportsUnavailableURLAndTinyLayoutFeedback(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Date: "2024-09-27", Title: "Video", MediaType: "video"}}, nil, "KEY")
+	m.db = &sql.DB{}
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 35, Height: 12})
+	m = updated.(tuiModel)
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "p", Code: 'p'})
+	m = updated.(tuiModel)
+	if cmd != nil || !strings.Contains(ansi.Strip(m.View().Content), "No preview URL") {
+		t.Fatalf("missing URL feedback invisible: status=%q view=%q", m.status, m.View().Content)
+	}
+}
+
+func TestTUIRefreshPreviewFailureKeepsExistingCachedImage(t *testing.T) {
+	root := t.TempDir()
+	previewDir := filepath.Join(root, "previews")
+	if err := os.Mkdir(previewDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openLibrary(filepath.Join(root, "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	path := filepath.Join(previewDir, "2024-09-27.jpg")
+	if err := os.WriteFile(path, []byte("working preview"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record := APODRecord{Date: "2024-09-27", Title: "Cached", MediaType: "image", URL: "http://127.0.0.1:1/unavailable.jpg", PreviewPath: path, FetchedAt: time.Now()}
+	if err := upsertAPOD(db, record); err != nil {
+		t.Fatal(err)
+	}
+	m := newTUIModel([]APODRecord{record}, nil, "KEY")
+	m.db = db
+	m.paths.PreviewDir = previewDir
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "p", Code: 'p'})
+	m = updated.(tuiModel)
+	var retry previewRetriedMsg
+	for _, run := range cmd().(tea.BatchMsg) {
+		if msg, ok := run().(previewRetriedMsg); ok {
+			retry = msg
+		}
+	}
+	updated, _ = m.Update(retry)
+	m = updated.(tuiModel)
+	contents, err := os.ReadFile(path)
+	if err != nil || string(contents) != "working preview" {
+		t.Fatalf("failed refresh damaged cache: contents=%q err=%v", contents, err)
+	}
+	if m.selectedRecord().PreviewPath != path || !strings.Contains(m.status, "still unavailable") {
+		t.Fatalf("cached image or feedback lost: record=%#v status=%q", m.selectedRecord(), m.status)
+	}
+}
+
+func TestTUIManualSyncRetriesPreviouslyFailedPreview(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("recovered preview"))
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	previewDir := filepath.Join(root, "previews")
+	if err := os.Mkdir(previewDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openLibrary(filepath.Join(root, "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Date(2024, 9, 27, 12, 0, 0, 0, time.UTC)
+	record := APODRecord{Date: now.Format("2006-01-02"), Title: "Recover", MediaType: "image", URL: server.URL + "/preview.jpg", PreviewError: "old failure", FetchedAt: now}
+	if err := upsertAPOD(db, record); err != nil {
+		t.Fatal(err)
+	}
+	m, err := newTUIModelFromLibrary(db, AppPaths{PreviewDir: previewDir}, "KEY", imageProtocolANSI, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.syncing = false
+	m.syncContext, m.cancelSync = context.WithCancel(t.Context())
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "s", Code: 's'})
+	m = updated.(tuiModel)
+	plan, err := prepareArchiveSyncContext(m.syncContext, db, "KEY", now)
+	if err != nil || len(plan.Items) != 1 || plan.Items[0].Date != record.Date {
+		t.Fatalf("retry plan = %#v, err=%v", plan, err)
+	}
+	updated, cmd := m.Update(archiveSyncPreparedMsg{plan: plan})
+	m = updated.(tuiModel)
+	if cmd == nil || !m.syncing {
+		t.Fatal("manual refresh did not start failed preview retry")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(tuiModel)
+	if m.syncing || m.selectedRecord().PreviewError != "" || m.selectedRecord().PreviewPath == "" || m.syncPreviewed != 1 {
+		t.Fatalf("manual retry did not recover: selected=%#v status=%q", m.selectedRecord(), m.syncStatus)
+	}
+}
+
+func TestTUIRecoveredPreviewRefreshesWezTermPlacement(t *testing.T) {
+	db, err := openLibrary(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	record := APODRecord{Date: "2024-09-27", Title: "Recovered", PreviewPath: "/preview.jpg", PreviewError: "old error", FetchedAt: time.Now()}
+	if err := upsertAPOD(db, record); err != nil {
+		t.Fatal(err)
+	}
+	m := newTUIModel([]APODRecord{record}, nil, "KEY")
+	m.db = db
+	m.imageProtocol = imageProtocolWezTerm
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	m.nativeImage = nativeImage{id: 42, path: record.PreviewPath, protocol: imageProtocolWezTerm, width: m.previewArea.width, height: m.previewArea.height}
+	m.nativeTarget = m.nativeImageKey()
+	m.retryingPreview = true
+	m.retryingDate = record.Date
+	if _, err := db.Exec(`UPDATE apods SET preview_error = '' WHERE date = ?`, record.Date); err != nil {
+		t.Fatal(err)
+	}
+	updated, cmd := m.Update(previewRetriedMsg{date: record.Date, result: itemSyncResult{Previewed: true}})
+	m = updated.(tuiModel)
+	if cmd == nil || m.nativeImage.id != 0 || m.nativeRequest == "" || m.selectedRecord().PreviewError != "" {
+		t.Fatalf("WezTerm image was not refreshed: id=%d request=%q error=%q", m.nativeImage.id, m.nativeRequest, m.selectedRecord().PreviewError)
 	}
 }
 

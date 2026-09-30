@@ -48,9 +48,16 @@ The desired direction is a **rich astronomy dashboard** with polished, usable vi
 - [x] Verify older non-favorites, filtering, toggling favorites, background sync, and native preview request for archived items.
 - [x] Collect feedback on Archive browsing in WezTerm.
 
+### 6. Manual refresh and preview retry — complete
+
+- [x] Add `s` to refresh missing APODs and retry previously failed previews using the existing sync planner.
+- [x] Add `p` to explicitly re-download the selected preview, including cached images and older Archive items, without syncing unrelated dates.
+- [x] Keep progress and errors visible; queue one follow-up refresh if another library operation is in progress.
+- [x] Verify successful and failed retries, no-op refreshes, selection and native preview updates.
+- [x] Collect feedback on refresh and retry in WezTerm.
+
 ## Later ideas
 
-- Manual refresh and preview retry from the TUI.
 - Cache-first and atomic full-image downloads across CLI and TUI.
 - Skip videos when cycling favorites.
 - Wallpaper history and scheduled rotation.
@@ -69,3 +76,7 @@ Milestone 3 evidence: model tests exercise wide, compact, stacked, and list-only
 Milestone 4 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `git diff --check` passed. Tests cover letterboxing, asynchronous preparation, cached reuse, stale generation rejection, resize, and fallback. User reviewed the previews in WezTerm and approved them.
 
 Milestone 5 evidence: SQLite-backed model tests cover older entries beyond the Recent 30, on-demand loading, independent searches, favorites, preserved selection, new sync items, and WezTerm preview requests. User reviewed Archive browsing in WezTerm and approved it.
+
+Milestone 6 evidence: local HTTP and SQLite model tests cover manual no-op and queued refreshes, retrying a failed preview through sync, selected older-Archive retry, and failed retry persistence. User confirmed `s` and the corrected `p` behavior in WezTerm.
+
+Feedback follow-up: `p` appeared inert after `s` because it accepted only entries with a stored preview error. It now refreshes any selected APOD with a preview URL, replaces cached files atomically, invalidates rendered-image caches, and shows feedback in the smallest layout. Tests cover a successful cached refresh, a failed refresh preserving the cached file, and a missing URL.

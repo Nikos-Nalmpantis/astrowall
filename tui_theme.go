@@ -41,9 +41,9 @@ func styleStatus(status string) string {
 // Pick complete groups of controls rather than truncating mid-action.
 func shortcutHints(width int, pane, detail string) string {
 	options := []string{
-		"/ search  •  b Recent/Archive  •  Tab panes  •  j/k move  •  d " + detail + "  •  Enter wallpaper  •  f favorite  •  o page  •  u media  •  a API key  •  ? help  •  q quit",
-		"/ search  •  b Recent/Archive  •  Tab panes  •  j/k move  •  d " + detail + "  •  Enter wallpaper  •  f favorite  •  ? help  •  q quit",
-		"/ search  •  b Archive  •  Tab panes  •  j/k move  •  Enter wallpaper  •  ? help",
+		"/ search  •  b Recent/Archive  •  s sync  •  p retry preview  •  Tab panes  •  j/k move  •  d " + detail + "  •  Enter wallpaper  •  f favorite  •  o page  •  u media  •  a API key  •  ? help  •  q quit",
+		"/ search  •  b Recent/Archive  •  s sync  •  p retry  •  Tab panes  •  j/k move  •  d " + detail + "  •  Enter wallpaper  •  f favorite  •  ? help  •  q quit",
+		"/ search  •  b Archive  •  s sync  •  Tab panes  •  j/k move  •  Enter wallpaper  •  ? help",
 		"/ search  •  b Archive  •  Tab panes  •  Enter wallpaper",
 		"? help",
 	}

@@ -52,11 +52,7 @@ func prepareArchiveSyncContext(ctx context.Context, db *sql.DB, apiKey string, n
 		return archiveSyncPlan{}, err
 	}
 	for _, record := range failedPreviews {
-		plan.Items = append(plan.Items, APODResponse{
-			Date: record.Date, Title: record.Title, Explanation: record.Description,
-			MediaType: record.MediaType, URL: record.URL, HDURL: record.HDURL,
-			ThumbnailURL: record.ThumbnailURL, Copyright: record.Copyright,
-		})
+		plan.Items = append(plan.Items, apodResponseFromRecord(record))
 	}
 	if shouldSync {
 		items, err := fetchAPODRangeContext(ctx, buildAPODRangeURL(apiKey, startDate, endDate))
@@ -74,6 +70,14 @@ func prepareArchiveSyncContext(ctx context.Context, db *sql.DB, apiKey string, n
 		plan.EndDate = plan.Items[len(plan.Items)-1].Date
 	}
 	return plan, nil
+}
+
+func apodResponseFromRecord(record APODRecord) APODResponse {
+	return APODResponse{
+		Date: record.Date, Title: record.Title, Explanation: record.Description,
+		MediaType: record.MediaType, URL: record.URL, HDURL: record.HDURL,
+		ThumbnailURL: record.ThumbnailURL, Copyright: record.Copyright,
+	}
 }
 
 func syncAPODArchive(db *sql.DB, paths AppPaths, apiKey string, now time.Time) (SyncResult, error) {
@@ -107,6 +111,10 @@ func syncAPODItem(db *sql.DB, paths AppPaths, item APODResponse, now time.Time) 
 }
 
 func syncAPODItemContext(ctx context.Context, db *sql.DB, paths AppPaths, item APODResponse, now time.Time) (itemSyncResult, error) {
+	return syncAPODItemContextWithRefresh(ctx, db, paths, item, now, false)
+}
+
+func syncAPODItemContextWithRefresh(ctx context.Context, db *sql.DB, paths AppPaths, item APODResponse, now time.Time, refreshPreview bool) (itemSyncResult, error) {
 	record := APODRecord{
 		Date:         item.Date,
 		Title:        item.Title,
@@ -128,18 +136,22 @@ func syncAPODItemContext(ctx context.Context, db *sql.DB, paths AppPaths, item A
 	if _, err := os.Stat(previewPath); err != nil {
 		if !os.IsNotExist(err) {
 			return itemSyncResult{}, fmt.Errorf("checking preview cache for %s: %w", item.Date, err)
-		} else if err := downloadImageAtomicContext(ctx, previewURL, previewPath); err != nil {
-			if ctx.Err() != nil {
-				return itemSyncResult{}, fmt.Errorf("downloading preview for %s: %w", item.Date, err)
-			}
-			var localErr localImageError
-			if errors.As(err, &localErr) {
-				return itemSyncResult{}, fmt.Errorf("downloading preview for %s: %w", item.Date, err)
-			}
-			result.PreviewError = fmt.Sprintf("downloading preview: %v", err)
-		} else {
-			result.Previewed = true
 		}
+	} else if !refreshPreview {
+		record.PreviewPath = previewPath
+		return result, upsertAPOD(db, record)
+	}
+	if err := downloadImageAtomicContext(ctx, previewURL, previewPath); err != nil {
+		if ctx.Err() != nil {
+			return itemSyncResult{}, fmt.Errorf("downloading preview for %s: %w", item.Date, err)
+		}
+		var localErr localImageError
+		if errors.As(err, &localErr) {
+			return itemSyncResult{}, fmt.Errorf("downloading preview for %s: %w", item.Date, err)
+		}
+		result.PreviewError = fmt.Sprintf("downloading preview: %v", err)
+	} else {
+		result.Previewed = true
 	}
 
 	if result.PreviewError == "" {

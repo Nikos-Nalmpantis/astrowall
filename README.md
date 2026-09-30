@@ -127,6 +127,8 @@ Current behavior:
 - `Tab` / `Shift+Tab`: switch between the primary pane (Recent or Archive) and Favorites
 - `q`: quit
 - `f`: favorite or unfavorite the selected item
+- `s`: refresh missing APODs and retry failed previews; pressing it during a library operation queues one follow-up refresh
+- `p`: re-download the selected APOD's preview (including a cached one) without refreshing the entire library; reports when no preview URL is available
 - `Enter`: fetch the selected day's image and set it as wallpaper
 - `d`: toggle between the selected APOD image and description
 - `a`: add, replace, or remove the saved NASA API key

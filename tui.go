@@ -78,6 +78,12 @@ type archiveItemSyncedMsg struct {
 	err          error
 }
 
+type previewRetriedMsg struct {
+	date   string
+	result itemSyncResult
+	err    error
+}
+
 type archiveLoadedMsg struct {
 	records []APODRecord
 	err     error
@@ -169,6 +175,9 @@ type tuiModel struct {
 	cancelNative     context.CancelFunc
 	tmux             bool
 	syncing          bool
+	syncQueued       bool
+	retryingPreview  bool
+	retryingDate     string
 	syncItems        []APODResponse
 	syncTotal        int
 	syncCompleted    int
@@ -333,7 +342,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.requestNativeImage()
 
 	case spinner.TickMsg:
-		if !m.loading && !m.syncing && !m.archiveLoading {
+		if !m.loading && !m.syncing && !m.archiveLoading && !m.retryingPreview {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -458,6 +467,22 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Browsing the full APOD archive"
 			return m, m.requestNativeImage()
 		}
+		if msg.String() == "s" {
+			if m.db == nil {
+				m.syncStatus = "Library refresh unavailable without a local library"
+				return m, nil
+			}
+			if m.syncing || m.retryingPreview || m.archiveLoading {
+				m.syncQueued = true
+				if m.syncing {
+					m.status = "Library refresh queued after the current sync"
+				} else {
+					m.syncStatus = "Refresh queued after the current library operation"
+				}
+				return m, nil
+			}
+			return m, m.beginManualSync()
+		}
 
 		if isNextPaneKey(msg) {
 			m.activePane = m.nextPane()
@@ -486,6 +511,31 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.apiKeyInput.Reset()
 			m.status = fmt.Sprintf("NASA API key source: %s", m.apiKeySource)
 			return m, tea.Batch(m.apiKeyInput.Focus(), m.clearNativeImage())
+		case "p":
+			if m.db == nil || m.retryingPreview || m.archiveLoading || m.syncing {
+				m.status = "Finish the current library operation before retrying a preview"
+				return m, nil
+			}
+			record := m.selectedRecord()
+			if record.Date == "" {
+				m.status = "Select an APOD to refresh its preview"
+				return m, nil
+			}
+			if preferredPreviewURL(apodResponseFromRecord(record)) == "" {
+				m.status = "No preview URL is available for this APOD"
+				return m, nil
+			}
+			m.retryingPreview = true
+			m.retryingDate = record.Date
+			m.status = fmt.Sprintf("Refreshing preview for %s…", record.Title)
+			ctx := m.syncContext
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			return m, tea.Batch(m.trackCmd(func() tea.Msg {
+				result, err := syncAPODItemContextWithRefresh(ctx, m.db, m.paths, apodResponseFromRecord(record), time.Now(), true)
+				return previewRetriedMsg{date: record.Date, result: result, err: err}
+			}), spinnerTickCmd(m.spinner))
 		case "d":
 			if m.selectedRecord().PreviewPath == "" {
 				m.refreshDetail(true)
@@ -573,17 +623,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.syncing = false
 			m.syncStatus = fmt.Sprintf("Library sync failed: %v", msg.err)
-			return m, nil
+			return m, m.startQueuedSync()
 		}
 		if msg.plan.AlreadyUpToDate {
 			m.syncing = false
 			m.syncStatus = "Local APOD library is up to date"
-			return m, nil
+			return m, m.startQueuedSync()
 		}
 		if len(msg.plan.Items) == 0 {
 			m.syncing = false
 			m.syncStatus = "Library sync returned no APODs"
-			return m, nil
+			return m, m.startQueuedSync()
 		}
 		m.syncItems = msg.plan.Items
 		m.syncTotal = len(msg.plan.Items)
@@ -595,7 +645,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncing = false
 			m.syncItems = nil
 			m.syncStatus = fmt.Sprintf("Library sync failed for %s: %v", msg.date, msg.err)
-			return m, m.requestNativeImage()
+			return m, tea.Batch(m.requestNativeImage(), m.startQueuedSync())
 		}
 		m.syncCompleted++
 		if msg.previewed {
@@ -608,22 +658,51 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncing = false
 			m.syncItems = nil
 			m.syncStatus = fmt.Sprintf("Library refresh failed: %v", err)
-			return m, nil
+			return m, m.startQueuedSync()
+		}
+		if msg.previewed {
+			m.invalidatePreviewForDate(msg.date)
 		}
 		m.syncItems = m.syncItems[1:]
 		if len(m.syncItems) == 0 {
 			m.syncing = false
 			m.syncStatus = fmt.Sprintf("Synced %d APODs, cached %d previews, %d preview errors", m.syncCompleted, m.syncPreviewed, m.syncFailed)
-			return m, m.requestNativeImage()
+			return m, tea.Batch(m.requestUpdatedPreview(msg.date, msg.previewed), m.startQueuedSync())
 		}
 		m.syncStatus = fmt.Sprintf("Syncing APOD %d/%d…", m.syncCompleted+1, m.syncTotal)
-		return m, tea.Batch(m.syncArchiveItemCmd(m.syncItems[0]), m.requestNativeImage())
+		return m, tea.Batch(m.syncArchiveItemCmd(m.syncItems[0]), m.requestUpdatedPreview(msg.date, msg.previewed))
+
+	case previewRetriedMsg:
+		if !m.retryingPreview || msg.date != m.retryingDate {
+			return m, nil
+		}
+		m.retryingPreview = false
+		m.retryingDate = ""
+		if msg.err != nil {
+			m.status = fmt.Sprintf("Preview retry failed for %s: %v", msg.date, msg.err)
+			return m, m.startQueuedSync()
+		}
+		selectedBeforeReload := m.selectedRecord().Date == msg.date
+		if err := m.reloadRetriedPreview(msg.date); err != nil {
+			m.status = fmt.Sprintf("Preview retry saved, but library refresh failed: %v", err)
+			return m, m.startQueuedSync()
+		}
+		if msg.result.PreviewError == "" {
+			m.invalidatePreviewForDate(msg.date)
+		}
+		if msg.result.PreviewError != "" {
+			m.status = fmt.Sprintf("Preview still unavailable for %s: %s", msg.date, msg.result.PreviewError)
+		} else {
+			m.status = fmt.Sprintf("Preview refreshed for %s", msg.date)
+		}
+		imageCmd := m.requestUpdatedPreview(msg.date, selectedBeforeReload && msg.result.PreviewError == "")
+		return m, tea.Batch(imageCmd, m.startQueuedSync())
 
 	case archiveLoadedMsg:
 		m.archiveLoading = false
 		if msg.err != nil {
 			m.status = fmt.Sprintf("Archive load failed: %v", msg.err)
-			return m, nil
+			return m, m.startQueuedSync()
 		}
 		m.archiveRecords = msg.records
 		for _, record := range m.recentRecords {
@@ -639,7 +718,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updatePaneTitles()
 		m.refreshDetail(true)
 		m.status = fmt.Sprintf("Browsing %d stored APODs", len(m.archiveRecords))
-		return m, m.requestNativeImage()
+		return m, tea.Batch(m.requestNativeImage(), m.startQueuedSync())
 
 	case favoriteToggledMsg:
 		if msg.err != nil {
@@ -831,7 +910,9 @@ func (m tuiModel) View() tea.View {
 		}
 		width := max(0, m.width-horizontalOuterInset*2)
 		footer := shortcutHints(width, m.activePaneLabel(), m.detailToggleLabel())
-		if m.selectedRecord().Date == "" && !m.showHelp && !m.showAPIKeyInput {
+		if (m.retryingPreview || strings.HasPrefix(m.status, "Preview ") || strings.HasPrefix(m.status, "No preview URL") || strings.HasPrefix(m.status, "Select an APOD to refresh")) && !m.showHelp && !m.showAPIKeyInput {
+			footer = ansi.Truncate(m.status, width, "…")
+		} else if m.selectedRecord().Date == "" && !m.showHelp && !m.showAPIKeyInput {
 			footer = ansi.Truncate(m.emptyDetailMessage(), width, "…")
 		}
 		body := lipgloss.JoinVertical(lipgloss.Left,
@@ -868,7 +949,7 @@ func (m tuiModel) View() tea.View {
 	}
 
 	status := m.status
-	if m.loading || m.archiveLoading {
+	if m.loading || m.archiveLoading || m.retryingPreview {
 		status = fmt.Sprintf("%s %s", m.spinner.View(), status)
 	}
 	if m.showHelp {
@@ -1393,6 +1474,30 @@ func (m tuiModel) prepareArchiveSyncCmd() tea.Cmd {
 	})
 }
 
+func (m *tuiModel) resetSyncProgress() {
+	m.syncItems = nil
+	m.syncTotal = 0
+	m.syncCompleted = 0
+	m.syncPreviewed = 0
+	m.syncFailed = 0
+}
+
+func (m *tuiModel) beginManualSync() tea.Cmd {
+	m.syncQueued = false
+	m.resetSyncProgress()
+	m.syncing = true
+	m.syncNow = time.Now()
+	m.syncStatus = "Checking for new APODs and failed previews…"
+	return tea.Batch(m.prepareArchiveSyncCmd(), spinnerTickCmd(m.spinner))
+}
+
+func (m *tuiModel) startQueuedSync() tea.Cmd {
+	if !m.syncQueued || m.syncing || m.retryingPreview || m.archiveLoading {
+		return nil
+	}
+	return m.beginManualSync()
+}
+
 func (m *tuiModel) startArchiveSync() tea.Cmd {
 	if m.syncStarted {
 		return nil
@@ -1456,6 +1561,29 @@ func (m *tuiModel) reloadRecords() error {
 	} else {
 		m.refreshDetail(false)
 	}
+	return nil
+}
+
+func (m *tuiModel) reloadRetriedPreview(date string) error {
+	record, err := recordByDate(m.db, date)
+	if err != nil {
+		return err
+	}
+	selected := selectedListDate(m.activeList())
+	for _, records := range [][]APODRecord{m.recentRecords, m.archiveRecords, m.favoriteRecords} {
+		for i := range records {
+			if records[i].Date == date {
+				records[i] = record
+			}
+		}
+	}
+	m.syncListItems()
+	if selected == date {
+		active := m.activeList()
+		selectListDate(&active, date)
+		m.setActiveList(active)
+	}
+	m.refreshDetail(false)
 	return nil
 }
 
@@ -1789,6 +1917,47 @@ func (m *tuiModel) updateHDPathInRecords(date, path string) {
 	}
 }
 
+func (m *tuiModel) invalidatePreviewForDate(date string) {
+	paths := make(map[string]struct{})
+	for _, records := range [][]APODRecord{m.recentRecords, m.archiveRecords, m.favoriteRecords} {
+		for _, record := range records {
+			if record.Date == date && record.PreviewPath != "" {
+				paths[record.PreviewPath] = struct{}{}
+			}
+		}
+	}
+	for key := range m.ansiCache {
+		for path := range paths {
+			if strings.HasPrefix(key, path+":") {
+				delete(m.ansiCache, key)
+			}
+		}
+	}
+	filtered := m.ansiCacheOrder[:0]
+	for _, key := range m.ansiCacheOrder {
+		if _, ok := m.ansiCache[key]; ok {
+			filtered = append(filtered, key)
+		}
+	}
+	m.ansiCacheOrder = filtered
+	if m.selectedRecord().Date == date {
+		m.nativeFallback = ""
+		m.cancelANSIPreview()
+		m.ansiKey = ""
+		m.ansiResult = ansiPreviewResult{}
+	}
+}
+
+func (m *tuiModel) requestUpdatedPreview(date string, replaced bool) tea.Cmd {
+	if replaced && m.selectedRecord().Date == date {
+		// Cached native placements must be deleted before preparing a replacement.
+		cleanup := m.clearNativeImage()
+		prepare := m.requestNativeImage()
+		return tea.Sequence(cleanup, prepare)
+	}
+	return m.requestNativeImage()
+}
+
 func isNextPaneKey(msg tea.KeyPressMsg) bool {
 	key := msg.Key()
 	if key.Code == tea.KeyTab && key.Mod == 0 {
@@ -1859,6 +2028,8 @@ func (m tuiModel) renderHelpView() string {
 		"  Enter              Download/apply wallpaper for selected APOD",
 		"  d                  Toggle image and description views",
 		"  a                  Add or replace the saved NASA API key",
+		"  s                  Sync missing APODs and retry failed previews",
+		"  p                  Re-download the selected APOD's preview",
 		"  PgUp / PgDown      Scroll the description view",
 		"  Ctrl+U / Ctrl+D    Scroll half a description page",
 		"  f                  Favorite or unfavorite the selected APOD",
