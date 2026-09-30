@@ -87,4 +87,8 @@ func TestCycleFavoriteWallpaperAdvancesStoredState(t *testing.T) {
 	if lastDate != "2024-09-26" {
 		t.Fatalf("lastDate = %s, want 2024-09-26", lastDate)
 	}
+	history, err := listWallpaperHistory(db)
+	if err != nil || len(history) != 2 || history[0].Date != second.Date {
+		t.Fatalf("cycling history = %#v, %v", history, err)
+	}
 }

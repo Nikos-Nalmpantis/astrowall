@@ -8,9 +8,10 @@ import (
 const lastCycledFavoriteKey = "last_cycled_favorite_date"
 
 type FavoriteCycleResult struct {
-	Date      string
-	Title     string
-	ImagePath string
+	Date         string
+	Title        string
+	ImagePath    string
+	HistoryError error
 }
 
 var wallpaperSetterFunc = setWallpaper
@@ -35,14 +36,15 @@ func cycleFavoriteWallpaper(db *sql.DB, paths AppPaths, apiKey string) (Favorite
 	if err != nil {
 		return FavoriteCycleResult{}, err
 	}
-	if err := wallpaperSetterFunc(imagePath); err != nil {
+	historyErr, err := applyRecordedWallpaper(db, next.Date, imagePath)
+	if err != nil {
 		return FavoriteCycleResult{}, err
 	}
 	if err := setStateValue(db, lastCycledFavoriteKey, next.Date); err != nil {
 		return FavoriteCycleResult{}, err
 	}
 
-	return FavoriteCycleResult{Date: next.Date, Title: next.Title, ImagePath: imagePath}, nil
+	return FavoriteCycleResult{Date: next.Date, Title: next.Title, ImagePath: imagePath, HistoryError: historyErr}, nil
 }
 
 func nextFavoriteRecord(records []APODRecord, lastDate string) APODRecord {

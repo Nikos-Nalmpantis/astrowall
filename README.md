@@ -119,6 +119,9 @@ Current behavior:
 - dashboard header: total local APOD count and favorites count
 - wide terminals: separate `Recent APODs` and `Favorites` panes beside the detail view
 - `b`: switch the primary pane between the latest 30 Recent items and the full local Archive (loaded on demand); searches and selection stay independent
+- `h`: open wallpaper History, or return to the previous Recent/Archive mode; History has its own search and selection, and Enter reapplies the selected wallpaper
+- History shows each wallpaper once, most recently used first, with its last-used time; all successful applications are retained in SQLite
+- the dashboard shows Astrowall's last-applied date when space allows, with selected-item indicators in metadata/description
 - compact terminals: the active list beside the detail view; narrow terminals stack the active list above it
 - very small terminals: a focused list view; `Tab` still switches between Recent and Favorites
 - detail pane: a bounded title, compact date/type/favorite metadata, preview/full-image cache indicators, and copyright attribution when space allows
@@ -164,6 +167,12 @@ Current behavior:
 - remembers the last favorite wallpaper it set
 - advances to the next favorite on each run
 - reuses the cached full image when available before downloading again
+
+## Wallpaper History
+
+Successful wallpaper changes from the CLI, TUI, and favorite cycling are recorded locally with their APOD date, applied image path, and timestamp. Recording begins with this version; earlier changes and wallpapers applied by other programs are not inferred.
+
+Press `h` in the TUI to browse History, `/` to search it, and Enter to reapply an image. Existing full-image cache files are reused, and missing files are downloaded from stored URLs. Reapplying an item moves it to the top without duplicating it in the browser; the database still retains each application event. If a history write fails after the wallpaper is applied, Astrowall reports a warning separately from desktop-application failures.
 
 ## Supported Platforms
 

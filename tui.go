@@ -36,6 +36,9 @@ func (i apodListItem) Title() string {
 
 func (i apodListItem) Description() string {
 	description := i.record.Date
+	if !i.record.LastAppliedAt.IsZero() {
+		description += " • used " + i.record.LastAppliedAt.Local().Format("Jan 2 15:04")
+	}
 	if i.record.PreviewError != "" {
 		description += " • preview error"
 	}
@@ -46,10 +49,11 @@ func (i apodListItem) Description() string {
 }
 
 type wallpaperAppliedMsg struct {
-	date  string
-	path  string
-	title string
-	err   error
+	date       string
+	path       string
+	title      string
+	err        error
+	historyErr error
 }
 
 type favoriteToggledMsg struct {
@@ -137,6 +141,11 @@ type tuiModel struct {
 	paths            AppPaths
 	recentList       list.Model
 	archiveList      list.Model
+	historyList      list.Model
+	historyRecords   []APODRecord
+	historyMode      bool
+	historyLoaded    bool
+	lastAppliedDate  string
 	favoriteList     list.Model
 	detail           viewport.Model
 	recentRecords    []APODRecord
@@ -195,7 +204,7 @@ type tuiModel struct {
 	cancelANSI       context.CancelFunc
 	nativeFallback   string
 	activePane       activePane
-	searchOriginal   [3]string
+	searchOriginal   [4]string
 	spinner          spinner.Model
 	listStyle        lipgloss.Style
 	detailStyle      lipgloss.Style
@@ -299,6 +308,7 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 	m := tuiModel{
 		recentList:      recentList,
 		archiveList:     archiveList,
+		historyList:     newListModel("History", nil),
 		favoriteList:    favoriteList,
 		detail:          detail,
 		recentRecords:   recentRecords,
@@ -435,7 +445,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelp = true
 			return m, m.clearNativeImage()
 		}
+		if msg.String() == "h" {
+			if m.archiveLoading {
+				m.status = "Finish loading the Archive before opening History"
+				return m, nil
+			}
+			return m, m.toggleHistory()
+		}
 		if msg.String() == "b" {
+			m.historyMode = false
 			if m.archiveMode {
 				m.archiveMode = false
 				m.activePane = recentPane
@@ -604,9 +622,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.updateHDPathInRecords(msg.date, msg.path)
+		m.lastAppliedDate = msg.date
+		if err := m.reloadHistory(); err != nil {
+			msg.historyErr = err
+		}
 		m.syncListItems()
 		m.refreshDetail(false)
 		m.status = fmt.Sprintf("Wallpaper set to %s", msg.title)
+		if msg.historyErr != nil {
+			m.status += fmt.Sprintf(" • history unavailable: %v", msg.historyErr)
+		}
 		return m, m.requestNativeImage()
 
 	case urlOpenedMsg:
@@ -733,6 +758,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.favoriteRecords = favorites
+		if err := m.reloadHistory(); err != nil {
+			m.status = fmt.Sprintf("Favorite saved, but history refresh failed: %v", err)
+			return m, nil
+		}
 		m.syncListItems()
 		if m.ready {
 			m.resize()
@@ -1016,6 +1045,7 @@ func (m *tuiModel) resize() {
 		m.recentList.SetSize(innerWidth, innerHeight)
 		m.archiveList.SetSize(innerWidth, innerHeight)
 		m.favoriteList.SetSize(innerWidth, innerHeight)
+		m.historyList.SetSize(innerWidth, innerHeight)
 		m.detail.SetWidth(max(1, m.width-horizontalOuterInset*2-detailHorizontalFrame))
 		m.detail.SetHeight(max(1, m.height-headerLineCount-1-detailVerticalFrame))
 		m.apiKeyInput.SetWidth(max(1, m.detail.Width()-lipgloss.Width(m.apiKeyInput.Prompt)))
@@ -1035,6 +1065,7 @@ func (m *tuiModel) resize() {
 		m.recentList.SetSize(listInnerWidth, listHeight)
 		m.archiveList.SetSize(listInnerWidth, listHeight)
 		m.favoriteList.SetSize(listInnerWidth, listHeight)
+		m.historyList.SetSize(listInnerWidth, listHeight)
 		m.detail.SetWidth(detailInnerWidth)
 		m.detail.SetHeight(detailHeight)
 		m.apiKeyInput.SetWidth(max(1, detailInnerWidth-lipgloss.Width(m.apiKeyInput.Prompt)))
@@ -1064,6 +1095,7 @@ func (m *tuiModel) resize() {
 
 	m.recentList.SetSize(listInnerWidth, recentInnerHeight)
 	m.archiveList.SetSize(listInnerWidth, recentInnerHeight)
+	m.historyList.SetSize(listInnerWidth, recentInnerHeight)
 	m.favoriteList.SetSize(listInnerWidth, favoriteInnerHeight)
 	m.detail.SetWidth(detailInnerWidth)
 	m.detail.SetHeight(detailInnerHeight)
@@ -1079,6 +1111,9 @@ func (m tuiModel) emptyDetailMessage() string {
 	}
 	if m.activePane == favoritesPane {
 		return "No favorites yet. Select an APOD in Recent and press f to save it here."
+	}
+	if m.historyMode {
+		return "No wallpaper history yet. Apply an image with Enter to start recording your wallpapers."
 	}
 	if m.archiveMode {
 		return "No APODs in the archive yet. New entries appear here as they sync."
@@ -1207,6 +1242,10 @@ func newTUIModelFromLibrary(db *sql.DB, paths AppPaths, apiKey string, protocol 
 		return tuiModel{}, err
 	}
 	model.paths = paths
+	model.lastAppliedDate, err = lastAppliedWallpaperDate(db)
+	if err != nil {
+		return tuiModel{}, err
+	}
 	model.syncing = true
 	model.syncNow = now
 	model.syncContext, model.cancelSync = context.WithCancel(context.Background())
@@ -1480,6 +1519,9 @@ func (m *tuiModel) reloadRecords() error {
 	}
 	m.recentRecords = recent
 	m.favoriteRecords = favorites
+	if err := m.reloadHistory(); err != nil {
+		return err
+	}
 	if m.archiveLoaded {
 		for _, record := range recent {
 			m.insertArchiveRecord(record)
@@ -1507,10 +1549,12 @@ func (m *tuiModel) reloadRetriedPreview(date string) error {
 		return err
 	}
 	selected := selectedListDate(m.activeList())
-	for _, records := range [][]APODRecord{m.recentRecords, m.archiveRecords, m.favoriteRecords} {
+	for _, records := range [][]APODRecord{m.recentRecords, m.archiveRecords, m.favoriteRecords, m.historyRecords} {
 		for i := range records {
 			if records[i].Date == date {
+				lastApplied := records[i].LastAppliedAt
 				records[i] = record
+				records[i].LastAppliedAt = lastApplied
 			}
 		}
 	}
@@ -1551,6 +1595,9 @@ func (m *tuiModel) syncListItems() {
 		m.syncSingleList(&m.archiveList, m.archiveRecords)
 	}
 	m.syncSingleList(&m.favoriteList, m.favoriteRecords)
+	if m.historyLoaded {
+		m.syncSingleList(&m.historyList, m.historyRecords)
+	}
 	m.updatePaneTitles()
 }
 
@@ -1575,11 +1622,12 @@ func applyWallpaperCmd(db *sql.DB, paths AppPaths, record APODRecord, apiKey str
 		if err != nil {
 			return wallpaperAppliedMsg{date: record.Date, title: record.Title, err: err}
 		}
-		if err := setWallpaper(cachedPath); err != nil {
+		historyErr, err := applyRecordedWallpaper(db, record.Date, cachedPath)
+		if err != nil {
 			return wallpaperAppliedMsg{date: record.Date, title: record.Title, path: cachedPath, err: err}
 		}
 
-		return wallpaperAppliedMsg{date: record.Date, title: record.Title, path: cachedPath, err: nil}
+		return wallpaperAppliedMsg{date: record.Date, title: record.Title, path: cachedPath, historyErr: historyErr}
 	}
 }
 
@@ -1628,6 +1676,9 @@ func (m tuiModel) activeList() list.Model {
 }
 
 func (m tuiModel) primaryList() list.Model {
+	if m.historyMode {
+		return m.historyList
+	}
 	if m.archiveMode {
 		return m.archiveList
 	}
@@ -1637,6 +1688,10 @@ func (m tuiModel) primaryList() list.Model {
 func (m *tuiModel) setActiveList(updated list.Model) {
 	if m.activePane == favoritesPane {
 		m.favoriteList = updated
+		return
+	}
+	if m.historyMode {
+		m.historyList = updated
 		return
 	}
 	if m.archiveMode {
@@ -1649,6 +1704,9 @@ func (m *tuiModel) setActiveList(updated list.Model) {
 func (m tuiModel) searchIndex() int {
 	if m.activePane == favoritesPane {
 		return 1
+	}
+	if m.historyMode {
+		return 3
 	}
 	if m.archiveMode {
 		return 2
@@ -1756,6 +1814,7 @@ func (m *tuiModel) updatePaneTitles() {
 	m.recentList.Title = m.paneTitle("Recent APODs", recentPane, m.recentList)
 	m.archiveList.Title = m.paneTitle("Archive", recentPane, m.archiveList)
 	m.favoriteList.Title = m.paneTitle("Favorites", favoritesPane, m.favoriteList)
+	m.historyList.Title = m.paneTitle("History", recentPane, m.historyList)
 }
 
 func (m tuiModel) paneTitle(title string, pane activePane, listModel list.Model) string {
@@ -1773,6 +1832,9 @@ func (m tuiModel) activePaneLabel() string {
 	if m.activePane == favoritesPane {
 		return "Favorites"
 	}
+	if m.historyMode {
+		return "History"
+	}
 	if m.archiveMode {
 		return "Archive"
 	}
@@ -1780,6 +1842,11 @@ func (m tuiModel) activePaneLabel() string {
 }
 
 func (m *tuiModel) updateFavoriteInRecent(date string, favorite bool) {
+	for i := range m.historyRecords {
+		if m.historyRecords[i].Date == date {
+			m.historyRecords[i].Favorite = favorite
+		}
+	}
 	for i := range m.recentRecords {
 		if m.recentRecords[i].Date == date {
 			m.recentRecords[i].Favorite = favorite
@@ -1793,6 +1860,11 @@ func (m *tuiModel) updateFavoriteInRecent(date string, favorite bool) {
 }
 
 func (m *tuiModel) updateHDPathInRecords(date, path string) {
+	for i := range m.historyRecords {
+		if m.historyRecords[i].Date == date {
+			m.historyRecords[i].HDPath = path
+		}
+	}
 	for i := range m.recentRecords {
 		if m.recentRecords[i].Date == date {
 			m.recentRecords[i].HDPath = path
@@ -1812,7 +1884,7 @@ func (m *tuiModel) updateHDPathInRecords(date, path string) {
 
 func (m *tuiModel) invalidatePreviewForDate(date string) {
 	paths := make(map[string]struct{})
-	for _, records := range [][]APODRecord{m.recentRecords, m.archiveRecords, m.favoriteRecords} {
+	for _, records := range [][]APODRecord{m.recentRecords, m.archiveRecords, m.favoriteRecords, m.historyRecords} {
 		for _, record := range records {
 			if record.Date == date && record.PreviewPath != "" {
 				paths[record.PreviewPath] = struct{}{}
@@ -1915,6 +1987,7 @@ func (m tuiModel) renderHelpView() string {
 		"  Shift+Tab          Switch to the previous pane",
 		"  /                  Search the active pane",
 		"  b                  Toggle Recent and full Archive",
+		"  h                  Toggle wallpaper History",
 		"  Esc                Clear an applied search",
 		"",
 		favoriteText.Render("Actions"),

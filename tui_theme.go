@@ -41,9 +41,9 @@ func styleStatus(status string) string {
 // Pick complete groups of controls rather than truncating mid-action.
 func shortcutHints(width int, pane, detail string) string {
 	options := []string{
-		"/ search  •  b Recent/Archive  •  s sync  •  p retry preview  •  Tab panes  •  j/k move  •  d " + detail + "  •  Enter wallpaper  •  f favorite  •  o page  •  u media  •  a API key  •  ? help  •  q quit",
-		"/ search  •  b Recent/Archive  •  s sync  •  p retry  •  Tab panes  •  j/k move  •  d " + detail + "  •  Enter wallpaper  •  f favorite  •  ? help  •  q quit",
-		"/ search  •  b Archive  •  s sync  •  Tab panes  •  j/k move  •  Enter wallpaper  •  ? help",
+		"/ search  •  b Recent/Archive  •  h History  •  s sync  •  p retry preview  •  Tab panes  •  j/k move  •  d " + detail + "  •  Enter wallpaper  •  f favorite  •  o page  •  u media  •  a API key  •  ? help  •  q quit",
+		"/ search  •  b Recent/Archive  •  h History  •  s sync  •  p retry  •  Tab panes  •  j/k move  •  d " + detail + "  •  Enter wallpaper  •  f favorite  •  ? help  •  q quit",
+		"/ search  •  b Archive  •  h History  •  Tab panes  •  Enter wallpaper  •  ? help",
 		"/ search  •  b Archive  •  Tab panes  •  Enter wallpaper",
 		"? help",
 	}
@@ -58,6 +58,14 @@ func shortcutHints(width int, pane, detail string) string {
 
 func (m tuiModel) renderDashboardHeader(width int) string {
 	brand := accentText.Bold(true).Render("✦ ASTROWALL")
+	if m.lastAppliedDate != "" {
+		label := "LAST APPLIED " + m.lastAppliedDate
+		counts := fmt.Sprintf("LIBRARY %d  ·  ★ %d", m.libraryCount, len(m.favoriteRecords))
+		gap := width - ansi.StringWidth(brand) - ansi.StringWidth(label) - ansi.StringWidth(counts) - 4
+		if gap >= 2 {
+			return brand + "  " + secondaryText.Render(label) + strings.Repeat(" ", gap+2) + favoriteText.Render(counts)
+		}
+	}
 	for _, summary := range []string{
 		fmt.Sprintf("LIBRARY %d  ·  ★ %d", m.libraryCount, len(m.favoriteRecords)),
 		fmt.Sprintf("%d APODs  ·  ★ %d", m.libraryCount, len(m.favoriteRecords)),

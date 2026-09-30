@@ -39,6 +39,9 @@
 - Copyright attribution in the image header where space allows, with full credit and preview-error details in description view.
 - Image/description toggle (`d`); paged and half-page description scrolling.
 - Set the selected image as wallpaper (Enter) and toggle its favorite state (`f`).
+- Searchable wallpaper History (`h`) with independent selection/search, latest-use ordering, last-used timestamps, and cached reapplication.
+- Successful CLI/TUI/favorite-cycle applications retained as SQLite history events; repeated uses appear once in the browser.
+- Last-applied-by-Astrowall indicators in the dashboard and selected-item metadata/description.
 - Open the NASA APOD page (`o`) or original media (`u`) in a browser, including videos.
 - Add, replace, or remove the saved NASA API key (`a`).
 
@@ -75,7 +78,7 @@
 - Archive means the complete **local** library; historical NASA backfill is not yet available.
 - Favorite cycling currently includes videos, which can stop a cycle with an error.
 - Cached images are checked for regular-file status and nonzero size, not decoded for integrity; pre-existing nonempty partial files may need removal.
-- Wallpaper history, scheduled rotation, and a displayed current-wallpaper indicator are not yet implemented.
+- History begins with this version and tracks Astrowall applications rather than external desktop changes; scheduled rotation is not yet implemented.
 - `tui.go` still owns substantial navigation, sync, rendering, and image lifecycle logic; focused extractions can make later dashboard work easier.
 
 Milestone progress and visual preferences are recorded in [PLAN.md](PLAN.md).

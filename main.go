@@ -164,6 +164,9 @@ func main() {
 			os.Exit(1)
 		}
 		printFavoriteCycleSummary(os.Stdout, result)
+		if result.HistoryError != nil {
+			fmt.Fprintf(os.Stderr, "Warning: wallpaper applied, but %v\n", result.HistoryError)
+		}
 		return
 	}
 	imagePath, err := resolveImagePath(output)
@@ -204,9 +207,13 @@ func main() {
 		break
 	}
 
-	if err := setWallpaper(imagePath); err != nil {
+	historyErr, err := applyRecordedWallpaper(db, apod.Date, imagePath)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error setting wallpaper: %v\n", err)
 		os.Exit(1)
+	}
+	if historyErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: wallpaper applied, but %v\n", historyErr)
 	}
 
 	if verbose {

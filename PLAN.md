@@ -78,12 +78,12 @@ The current feature inventory is maintained in [FEATURES.md](FEATURES.md). The n
 
 **Done when:** the detail pane is more informative and visually polished without crowding the preview or misaligning native images.
 
-### 9. Wallpaper history and last-applied indicator
+### 9. Wallpaper history and last-applied indicator — implemented, awaiting feedback
 
-- [ ] Record successful wallpaper applications across CLI, TUI, and favorite cycling through shared application logic.
-- [ ] Add a searchable history view and allow cached reapplication.
-- [ ] Show the last wallpaper applied by Astrowall; do not imply tracking external desktop changes.
-- [ ] Verify persistence, ordering, missing-cache recovery, and exclusion of failed applications.
+- [x] Record successful wallpaper applications across CLI, TUI, and favorite cycling through shared application logic.
+- [x] Add a searchable history view and allow cached reapplication.
+- [x] Show the last wallpaper applied by Astrowall; do not imply tracking external desktop changes.
+- [x] Verify persistence, ordering, missing-cache recovery, and exclusion of failed applications.
 - [ ] Collect feedback on history browsing and the last-applied indicator.
 
 **Done when:** previous wallpapers can be found and reapplied, with an accurate record of Astrowall's last successful change.
@@ -151,3 +151,9 @@ Milestone 7 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and 
 Milestone 8 evidence: model tests cover cached/uncached/error/video metadata, favorite badges without adding image-header rows, long multilingual titles, compact/stacked/wide window bounds, full-image cache feedback, and attribution/error details in description view. Native-image coordinates are checked against the actual rendered header boundary. Titles use at most two rows (one in short panes); attribution yields space to previews in short panes. Cache indicators reflect recorded paths rather than checking disk on every render. A direct WezTerm visual review is still required for aesthetics and native-image appearance.
 
 Milestone 8 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `git diff --check` passed. User reviewed the dashboard and approved the look before milestone 9.
+
+Milestone 9 behavior: `h` opens History in the primary pane and returns to the previous Recent/Archive mode; `b` leaves History and toggles Recent/Archive. History keeps an independent search and selection, shows each APOD once in most-recent-use order, and displays a last-used timestamp. SQLite retains every successful application event, including repeats, with output paths and timestamps. Shared application logic records CLI, TUI, and favorite cycling; history-write failures warn after a successful desktop change. The dashboard shows the last-applied date when space allows, and selected-item metadata/description also identify it. Recording starts with this milestone; past desktop changes are not inferred.
+
+Milestone 9 evidence: isolated SQLite and model tests cover persistence after reopening, repeated events and deterministic latest-use ordering, failed-application exclusion, history-write warnings, favorite-cycle recording, offline cached reapplication, missing-cache recovery, independent searches/selections, empty history, responsive bounds, native-preview placement, and history updates after applying an item. Actual desktop integration and visual appearance require direct WezTerm feedback.
+
+Milestone 9 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `git diff --check` passed. Awaiting user feedback before milestone 10.

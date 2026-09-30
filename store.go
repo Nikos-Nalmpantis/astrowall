@@ -9,19 +9,20 @@ import (
 )
 
 type APODRecord struct {
-	Date         string
-	Title        string
-	Description  string
-	MediaType    string
-	URL          string
-	HDURL        string
-	ThumbnailURL string
-	Copyright    string
-	PreviewPath  string
-	PreviewError string
-	HDPath       string
-	Favorite     bool
-	FetchedAt    time.Time
+	Date          string
+	Title         string
+	Description   string
+	MediaType     string
+	URL           string
+	HDURL         string
+	ThumbnailURL  string
+	Copyright     string
+	PreviewPath   string
+	PreviewError  string
+	HDPath        string
+	Favorite      bool
+	FetchedAt     time.Time
+	LastAppliedAt time.Time
 }
 
 func openLibrary(dbPath string) (*sql.DB, error) {
@@ -69,6 +70,15 @@ CREATE TABLE IF NOT EXISTS app_state (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS wallpaper_history (
+	id INTEGER PRIMARY KEY,
+	apod_date TEXT NOT NULL REFERENCES apods(date),
+	image_path TEXT NOT NULL,
+	applied_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallpaper_history_date ON wallpaper_history(apod_date, id DESC);
 
 CREATE INDEX IF NOT EXISTS idx_apods_fetched_at ON apods(fetched_at DESC);
 CREATE INDEX IF NOT EXISTS idx_apods_favorite ON apods(favorite, date DESC);

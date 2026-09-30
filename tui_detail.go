@@ -26,6 +26,12 @@ func (m *tuiModel) refreshDetail(resetScroll bool) {
 		if record.Copyright != "" {
 			parts = append(parts, "", secondaryText.Render("Credit: "+strings.TrimSpace(record.Copyright)))
 		}
+		if record.Date == m.lastAppliedDate {
+			parts = append(parts, "", favoriteText.Render("Last applied by Astrowall"))
+		}
+		if !record.LastAppliedAt.IsZero() {
+			parts = append(parts, "", secondaryText.Render("Last used: "+record.LastAppliedAt.Local().Format("2006-01-02 15:04 MST")))
+		}
 		if record.PreviewError != "" {
 			parts = append(parts, "", statusError.Render("Preview error: "+record.PreviewError))
 		}
@@ -110,6 +116,9 @@ func (m tuiModel) detailHeader(record APODRecord) []string {
 		}
 	}
 	cache := preview + " · " + full
+	if record.Date == m.lastAppliedDate {
+		cache += " · Last applied"
+	}
 	if ansi.StringWidth(cache) > width {
 		cache = strings.ReplaceAll(cache, "saved", "✓")
 		cache = strings.ReplaceAll(cache, " (retry)", " !")
