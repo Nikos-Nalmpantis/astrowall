@@ -626,6 +626,124 @@ func TestTUIModelFitsWindow(t *testing.T) {
 	}
 }
 
+func TestTUIResponsiveLayoutsKeepSelectionSearchAndImageInsidePanes(t *testing.T) {
+	recent := []APODRecord{{Date: "2024-09-27", Title: "Recent", PreviewPath: "/preview.jpg"}}
+	favorites := []APODRecord{{Date: "2024-09-26", Title: "Favorite", Favorite: true, PreviewPath: "/favorite.jpg"}}
+	for _, size := range []tea.WindowSizeMsg{{Width: 120, Height: 40}, {Width: 79, Height: 24}, {Width: 60, Height: 20}, {Width: 49, Height: 24}, {Width: 35, Height: 18}, {Width: 30, Height: 14}, {Width: 25, Height: 10}} {
+		m := newTUIModel(recent, favorites, "KEY")
+		m.imageProtocol = imageProtocolWezTerm
+		updated, _ := m.Update(size)
+		m = updated.(tuiModel)
+		check := func(stage string) {
+			t.Helper()
+			view := m.View().Content
+			if got := lipgloss.Width(view); got > size.Width {
+				t.Errorf("%dx%d %s: width %d", size.Width, size.Height, stage, got)
+			}
+			if got := lipgloss.Height(view); got > size.Height {
+				t.Errorf("%dx%d %s: height %d", size.Width, size.Height, stage, got)
+			}
+			if m.nativeImageWanted() {
+				x, y := m.nativeImagePosition()
+				if x < horizontalOuterInset || y < headerLineCount+verticalOuterInset || x+m.previewArea.width > size.Width-horizontalOuterInset || y+m.previewArea.height > size.Height-statusLineCount-verticalOuterInset {
+					t.Errorf("%dx%d %s: preview at %d,%d size %dx%d outside pane", size.Width, size.Height, stage, x, y, m.previewArea.width, m.previewArea.height)
+				}
+			}
+		}
+		check("recent")
+		if size.Width < minimumDashboardWidth && !m.minimalLayout() {
+			t.Fatal("tiny window should use list-only layout")
+		}
+		updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+		m = updated.(tuiModel)
+		if m.selectedRecord().Title != "Favorite" {
+			t.Fatalf("%dx%d: Tab did not select favorite", size.Width, size.Height)
+		}
+		check("favorites")
+		m = typeSearchQuery(t, m, "No match")
+		if !strings.Contains(m.detail.View(), "No matches") {
+			t.Errorf("%dx%d: no-results message missing: %q", size.Width, size.Height, m.detail.View())
+		}
+		check("search")
+	}
+}
+
+func TestTUIEmptyFavoritesCanBeVisitedWithTab(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Date: "2024-09-27", Title: "Recent"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = updated.(tuiModel)
+	if m.activePane != favoritesPane || !strings.Contains(ansi.Strip(m.View().Content), "No favorites yet") {
+		t.Fatalf("empty favorites not reachable or not explained: %q", m.View().Content)
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	m = updated.(tuiModel)
+	if m.activePane != recentPane || m.selectedRecord().Title != "Recent" {
+		t.Fatal("could not return to Recent from empty Favorites")
+	}
+}
+
+func TestTUISearchEmptyFavoritesExplainsNoMatches(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Date: "2024-09-27", Title: "Recent"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = updated.(tuiModel)
+	m = typeSearchQuery(t, m, "Moon")
+	if !strings.Contains(ansi.Strip(m.detail.View()), "No matches in Favorites") {
+		t.Fatalf("empty favorites search detail = %q", m.detail.View())
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = updated.(tuiModel)
+	if !strings.Contains(ansi.Strip(m.detail.View()), "No favorites yet") {
+		t.Fatalf("cleared search detail = %q", m.detail.View())
+	}
+}
+
+func TestTUIEmptyStates(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		recent    []APODRecord
+		favorites []APODRecord
+		pane      activePane
+		want      string
+	}{
+		{"library", nil, nil, recentPane, "library is empty"},
+		{"favorites", []APODRecord{{Date: "2024-09-27", Title: "Recent"}}, nil, favoritesPane, "No favorites yet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTUIModel(tc.recent, tc.favorites, "KEY")
+			m.activePane = tc.pane
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+			m = updated.(tuiModel)
+			if !strings.Contains(m.detail.View(), tc.want) {
+				t.Fatalf("detail = %q, want %q", m.detail.View(), tc.want)
+			}
+			if m.previewArea.height != 0 || m.nativeImageWanted() {
+				t.Fatalf("empty pane requested image: area = %#v", m.previewArea)
+			}
+		})
+	}
+}
+
+func TestTUIResizeFromWideToStackedReplacesNativePlacement(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Date: "2024-09-27", Title: "Recent", PreviewPath: "/preview.jpg"}}, nil, "KEY")
+	m.imageProtocol = imageProtocolWezTerm
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(tuiModel)
+	oldKey := m.nativeRequest
+	m.nativeImage = nativeImage{id: 42, path: "/preview.jpg", protocol: imageProtocolWezTerm, width: m.previewArea.width, height: m.previewArea.height}
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
+	m = updated.(tuiModel)
+	if cmd == nil || m.nativeRequest == oldKey || m.nativeTarget == "" || m.nativeImage.id != 0 {
+		t.Fatalf("resize must clear and replace placement: old=%q new=%q active=%d", oldKey, m.nativeRequest, m.nativeImage.id)
+	}
+	if x, _ := m.nativeImagePosition(); x != horizontalOuterInset+m.detailStyle.GetBorderLeftSize()+m.detailStyle.GetPaddingLeft() {
+		t.Fatalf("stacked preview x=%d", x)
+	}
+}
+
 func TestTUIModelUsesFixedPaneGapsAcrossResizes(t *testing.T) {
 	recent := []APODRecord{{Date: "2024-09-27", Title: "Recent"}}
 	favorites := []APODRecord{{Date: "2024-08-01", Title: "Favorite", Favorite: true}}

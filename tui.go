@@ -202,6 +202,10 @@ const (
 	verticalInterPaneGap   = 0
 	horizontalOuterInset   = 2
 	horizontalInterPaneGap = 1
+	compactWidth           = 80
+	stackedWidth           = 50
+	minimumDashboardWidth  = 30
+	minimumDashboardHeight = 14
 )
 
 func newListModel(title string, records []APODRecord) list.Model {
@@ -392,13 +396,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if isNextPaneKey(msg) {
-			m.activePane = m.nextPane(false)
+			m.activePane = m.nextPane()
 			m.updatePaneTitles()
 			m.refreshDetail(true)
 			return m, m.requestNativeImage()
 		}
 		if isPreviousPaneKey(msg) {
-			m.activePane = m.nextPane(true)
+			m.activePane = m.nextPane()
 			m.updatePaneTitles()
 			m.refreshDetail(true)
 			return m, m.requestNativeImage()
@@ -565,10 +569,6 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.favoriteRecords = favorites
-		if m.activePane == favoritesPane && len(m.favoriteRecords) == 0 {
-			m.activePane = recentPane
-			m.updatePaneTitles()
-		}
 		m.syncListItems()
 		if m.ready {
 			m.resize()
@@ -715,13 +715,6 @@ func (m tuiModel) View() tea.View {
 		view.AltScreen = true
 		return view
 	}
-
-	leftColumn := lipgloss.JoinVertical(
-		lipgloss.Left,
-		m.renderListPane(recentPane, m.recentList),
-		m.renderListPane(favoritesPane, m.favoriteList),
-	)
-
 	detailView := m.detail.View()
 	if m.showHelp {
 		help := m.detail
@@ -732,14 +725,48 @@ func (m tuiModel) View() tea.View {
 	if m.showAPIKeyInput {
 		detailView = m.renderAPIKeyInput()
 	}
+	if m.minimalLayout() {
+		content := m.renderListPane(m.activePane, m.activeList())
+		if m.showHelp || m.showAPIKeyInput {
+			content = m.detailStyle.Render(detailView)
+		}
+		width := max(0, m.width-horizontalOuterInset*2)
+		footer := shortcutHints(width, m.activePaneLabel(), m.detailToggleLabel())
+		if m.selectedRecord().Date == "" && !m.showHelp && !m.showAPIKeyInput {
+			footer = ansi.Truncate(m.emptyDetailMessage(), width, "…")
+		}
+		body := lipgloss.JoinVertical(lipgloss.Left,
+			strings.Repeat(" ", horizontalOuterInset)+m.renderDashboardHeader(width),
+			strings.Repeat(" ", horizontalOuterInset)+content,
+			strings.Repeat(" ", horizontalOuterInset)+m.helpStyle.Render(footer),
+		)
+		view := tea.NewView(body)
+		view.AltScreen = true
+		return view
+	}
 
-	panes := lipgloss.JoinHorizontal(lipgloss.Top,
-		strings.Repeat(" ", horizontalOuterInset),
-		leftColumn,
-		strings.Repeat(" ", horizontalInterPaneGap),
-		m.detailStyle.Render(detailView),
-		strings.Repeat(" ", horizontalOuterInset),
-	)
+	var panes string
+	if m.stackedLayout() {
+		panes = strings.Repeat(" ", horizontalOuterInset) + lipgloss.JoinVertical(lipgloss.Left,
+			m.renderListPane(m.activePane, m.activeList()),
+			m.detailStyle.Render(detailView),
+		)
+	} else {
+		leftColumn := m.renderListPane(m.activePane, m.activeList())
+		if !m.compactLayout() {
+			leftColumn = lipgloss.JoinVertical(lipgloss.Left,
+				m.renderListPane(recentPane, m.recentList),
+				m.renderListPane(favoritesPane, m.favoriteList),
+			)
+		}
+		panes = lipgloss.JoinHorizontal(lipgloss.Top,
+			strings.Repeat(" ", horizontalOuterInset),
+			leftColumn,
+			strings.Repeat(" ", horizontalInterPaneGap),
+			m.detailStyle.Render(detailView),
+			strings.Repeat(" ", horizontalOuterInset),
+		)
+	}
 
 	status := m.status
 	if m.loading {
@@ -785,6 +812,18 @@ func layoutSpacer(height int) string {
 	return strings.Repeat("\n", height-1) + " "
 }
 
+func (m tuiModel) minimalLayout() bool {
+	return m.width < minimumDashboardWidth || m.height < minimumDashboardHeight
+}
+
+func (m tuiModel) compactLayout() bool {
+	return m.width < compactWidth
+}
+
+func (m tuiModel) stackedLayout() bool {
+	return m.width < stackedWidth
+}
+
 func (m *tuiModel) resize() {
 	if m.width <= 0 || m.height <= 0 {
 		return
@@ -792,8 +831,36 @@ func (m *tuiModel) resize() {
 
 	listHorizontalFrame, listVerticalFrame := m.listStyle.GetFrameSize()
 	detailHorizontalFrame, detailVerticalFrame := m.detailStyle.GetFrameSize()
+	if m.minimalLayout() {
+		innerWidth := max(1, m.width-horizontalOuterInset*2-listHorizontalFrame-1)
+		innerHeight := max(1, m.height-headerLineCount-1-listVerticalFrame)
+		m.recentList.SetSize(innerWidth, innerHeight)
+		m.favoriteList.SetSize(innerWidth, innerHeight)
+		m.detail.SetWidth(max(1, m.width-horizontalOuterInset*2-detailHorizontalFrame))
+		m.detail.SetHeight(max(1, m.height-headerLineCount-1-detailVerticalFrame))
+		m.apiKeyInput.SetWidth(max(1, m.detail.Width()-lipgloss.Width(m.apiKeyInput.Prompt)))
+		m.previewArea = imageArea{}
+		m.refreshDetail(false)
+		return
+	}
 
 	contentHeight := max(1, m.height-headerLineCount-statusLineCount-verticalOuterInset*2-verticalInterPaneGap*2)
+	if m.stackedLayout() {
+		outerWidth := max(1, m.width-horizontalOuterInset*2)
+		listInnerWidth := max(1, outerWidth-listHorizontalFrame-1)
+		detailInnerWidth := max(1, outerWidth-detailHorizontalFrame)
+		listOuterHeight := max(5, contentHeight*2/5)
+		listHeight := max(1, listOuterHeight-listVerticalFrame)
+		detailHeight := max(1, contentHeight-listOuterHeight-detailVerticalFrame)
+		m.recentList.SetSize(listInnerWidth, listHeight)
+		m.favoriteList.SetSize(listInnerWidth, listHeight)
+		m.detail.SetWidth(detailInnerWidth)
+		m.detail.SetHeight(detailHeight)
+		m.apiKeyInput.SetWidth(max(1, detailInnerWidth-lipgloss.Width(m.apiKeyInput.Prompt)))
+		m.previewArea = imageArea{width: detailInnerWidth}
+		m.refreshDetail(false)
+		return
+	}
 	availableWidth := max(2, m.width-horizontalOuterInset*2-horizontalInterPaneGap)
 	leftOuterWidth := availableWidth / 3
 	if m.width >= 40 {
@@ -808,6 +875,10 @@ func (m *tuiModel) resize() {
 	leftInnerHeight := max(2, contentHeight-listVerticalFrame*2-verticalInterPaneGap)
 	recentInnerHeight := (leftInnerHeight + 1) / 2
 	favoriteInnerHeight := leftInnerHeight / 2
+	if m.compactLayout() {
+		recentInnerHeight = max(1, contentHeight-listVerticalFrame)
+		favoriteInnerHeight = recentInnerHeight
+	}
 	detailInnerHeight := max(1, contentHeight-detailVerticalFrame)
 
 	m.recentList.SetSize(listInnerWidth, recentInnerHeight)
@@ -823,7 +894,8 @@ func (m *tuiModel) resize() {
 func (m *tuiModel) refreshDetail(resetScroll bool) {
 	record := m.selectedRecord()
 	if record.Date == "" {
-		m.detail.SetContent("No APOD records are available for the active pane.")
+		m.previewArea.height = 0
+		m.detail.SetContent(m.emptyDetailMessage())
 		if resetScroll {
 			m.detail.GotoTop()
 		}
@@ -833,6 +905,9 @@ func (m *tuiModel) refreshDetail(resetScroll bool) {
 
 	parts := m.detailHeader(record)
 	if m.descriptionVisible() {
+		if record.PreviewPath == "" {
+			parts = append(parts, "", secondaryText.Render("Preview unavailable · showing description"))
+		}
 		parts = append(parts, "", accentText.Bold(true).Render("Description"), "", strings.TrimSpace(record.Description))
 	} else if record.PreviewPath != "" && m.nativeImageMatches(record.PreviewPath) {
 		parts = append(parts, m.nativeImage.placeholders)
@@ -840,8 +915,7 @@ func (m *tuiModel) refreshDetail(resetScroll bool) {
 		if preview, err := renderPreviewBlock(record.PreviewPath, m.previewArea.width, m.previewArea.height); err == nil && preview != "" {
 			parts = append(parts, preview)
 		} else {
-			parts = append(parts, fmt.Sprintf("Preview cache: %s", record.PreviewPath))
-			parts = append(parts, "Preview could not be rendered in this terminal session.")
+			parts = append(parts, "Preview unavailable. Press d to read the description or u to open the media.")
 		}
 	}
 	wrappedContent := wordwrap.String(strings.Join(parts, "\n"), max(20, m.detail.Width()))
@@ -850,6 +924,16 @@ func (m *tuiModel) refreshDetail(resetScroll bool) {
 	if resetScroll {
 		m.detail.GotoTop()
 	}
+}
+
+func (m tuiModel) emptyDetailMessage() string {
+	if m.activeList().IsFiltered() {
+		return "No matches in " + m.activePaneLabel() + ". Press Esc to clear the search."
+	}
+	if m.activePane == favoritesPane {
+		return "No favorites yet. Select an APOD in Recent and press f to save it here."
+	}
+	return "Your library is empty. Checking NASA for new APODs…"
 }
 
 func (m tuiModel) descriptionVisible() bool {
@@ -985,7 +1069,7 @@ func newTUIModelFromLibrary(db *sql.DB, paths AppPaths, apiKey string, protocol 
 
 func (m tuiModel) nativeImageWanted() bool {
 	record := m.selectedRecord()
-	return (m.imageProtocol == imageProtocolKitty || m.imageProtocol == imageProtocolWezTerm) && !m.showDescription && !m.showHelp && !m.showAPIKeyInput && !m.activeList().SettingFilter() && record.PreviewPath != "" && m.previewArea.width > 0 && m.previewArea.height > 0
+	return !m.minimalLayout() && (m.imageProtocol == imageProtocolKitty || m.imageProtocol == imageProtocolWezTerm) && !m.showDescription && !m.showHelp && !m.showAPIKeyInput && !m.activeList().SettingFilter() && record.PreviewPath != "" && m.previewArea.width > 0 && m.previewArea.height > 0
 }
 
 func (m tuiModel) nativeImageKey() string {
@@ -1002,12 +1086,19 @@ func (m tuiModel) nativeImageMatches(path string) bool {
 }
 
 func (m tuiModel) nativeImagePosition() (int, int) {
-	listHorizontalFrame, _ := m.listStyle.GetFrameSize()
-	leftOuterWidth := m.recentList.Width() + listHorizontalFrame + 1
-	detailX := horizontalOuterInset + leftOuterWidth + horizontalInterPaneGap
+	detailX := horizontalOuterInset
+	detailY := headerLineCount + verticalOuterInset
+	if m.stackedLayout() {
+		_, listVerticalFrame := m.listStyle.GetFrameSize()
+		detailY += m.activeList().Height() + listVerticalFrame
+	} else {
+		listHorizontalFrame, _ := m.listStyle.GetFrameSize()
+		leftOuterWidth := m.recentList.Width() + listHorizontalFrame + 1
+		detailX += leftOuterWidth + horizontalInterPaneGap
+	}
 	x := detailX + m.detailStyle.GetBorderLeftSize() + m.detailStyle.GetPaddingLeft()
 	headerLines := m.detailHeaderHeight(m.selectedRecord())
-	y := headerLineCount + verticalOuterInset + m.detailStyle.GetBorderTopSize() + m.detailStyle.GetPaddingTop() + headerLines
+	y := detailY + m.detailStyle.GetBorderTopSize() + m.detailStyle.GetPaddingTop() + headerLines
 	return x, y
 }
 
@@ -1323,7 +1414,7 @@ func (m *tuiModel) updateSearch(msg tea.Msg) tea.Cmd {
 	activeList.FilterInput.Focus()
 	m.setActiveList(activeList)
 	m.updatePaneTitles()
-	if m.selectedRecord().Date != beforeDate {
+	if m.selectedRecord().Date != beforeDate || m.selectedRecord().Date == "" {
 		m.refreshDetail(true)
 	}
 	return cmd
@@ -1364,18 +1455,8 @@ func (m *tuiModel) clearSearch() tea.Cmd {
 	return m.requestNativeImage()
 }
 
-func (m tuiModel) nextPane(reverse bool) activePane {
-	if reverse {
-		if m.activePane == recentPane {
-			if len(m.favoriteRecords) > 0 {
-				return favoritesPane
-			}
-			return recentPane
-		}
-		return recentPane
-	}
-
-	if m.activePane == recentPane && len(m.favoriteRecords) > 0 {
+func (m tuiModel) nextPane() activePane {
+	if m.activePane == recentPane {
 		return favoritesPane
 	}
 	return recentPane

@@ -113,9 +113,12 @@ By default, metadata is stored under your XDG data directory (usually `~/.local/
 Current behavior:
 
 - dashboard header: total local APOD count and favorites count
-- left column: separate `Recent APODs` and `Favorites` panes
+- wide terminals: separate `Recent APODs` and `Favorites` panes beside the detail view
+- compact terminals: the active list beside the detail view; narrow terminals stack the active list above it
+- very small terminals: a focused list view; `Tab` still switches between Recent and Favorites
 - right pane: the selected item's date, type, cache status, and description
 - separate sync progress and action-feedback lines beneath the panes
+- helpful messages for an empty library, empty favorites, no search matches, and unavailable previews
 - `j` / `k`: move through the list
 - `/`: search the active pane by title, date, or description
 - `Enter`: apply the current search

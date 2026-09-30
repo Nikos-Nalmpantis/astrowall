@@ -26,9 +26,12 @@ The desired direction is a **rich astronomy dashboard** with polished, usable vi
 - [x] Adjust WezTerm placement for the header and verify multi-size layout, counts during sync, and preview lifecycle.
 - [x] Collect feedback on the dashboard before starting responsive layout work.
 
-### 3. Responsive layout and empty states — pending
+### 3. Responsive layout and empty states — complete
 
-Give narrow terminals usable pane arrangements and contextual hints. Clarify empty library, empty favorites, no search results, and unavailable preview states. Verify keyboard navigation, filtering, geometry, and image cleanup.
+- [x] Keep two sidebar panes on wide screens; show the active list on compact screens, stack it above details on narrow screens, and use a focused list on very small screens.
+- [x] Explain empty library, empty favorites, no search matches, and unavailable previews; allow Tab to open an empty Favorites pane.
+- [x] Verify filtering, pane switching, native image cleanup and placement, and bounds at representative sizes.
+- [x] Collect feedback on the responsive layout in WezTerm.
 
 ### 4. Image presentation and responsiveness — pending
 
@@ -53,3 +56,5 @@ For milestone 1, the claim is visual consistency without breaking sizing, naviga
 Milestone 1 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `git diff --check` passed. User reviewed the look in WezTerm and approved it.
 
 Milestone 2 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `git diff --check` passed. Model tests cover full-library counts, progress/action coexistence, multiple window sizes, and WezTerm image position. User reviewed the dashboard in WezTerm and approved it.
+
+Milestone 3 evidence: model tests exercise wide, compact, stacked, and list-only layouts, selection and search across pane switches, bounds, and native-image invalidation after resizing. User reviewed the responsive layout in WezTerm and approved it.
