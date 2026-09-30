@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -53,4 +54,23 @@ func shortcutHints(width int, pane, detail string) string {
 		}
 	}
 	return ansi.Truncate(pane, width, "")
+}
+
+func (m tuiModel) renderDashboardHeader(width int) string {
+	brand := accentText.Bold(true).Render("✦ ASTROWALL")
+	for _, summary := range []string{
+		fmt.Sprintf("LIBRARY %d  ·  ★ %d", m.libraryCount, len(m.favoriteRecords)),
+		fmt.Sprintf("%d APODs  ·  ★ %d", m.libraryCount, len(m.favoriteRecords)),
+		fmt.Sprintf("★ %d", len(m.favoriteRecords)),
+		"",
+	} {
+		if summary == "" {
+			return ansi.Truncate(brand, width, "")
+		}
+		gap := width - ansi.StringWidth(brand) - ansi.StringWidth(summary)
+		if gap >= 2 {
+			return brand + strings.Repeat(" ", gap) + favoriteText.Render(summary)
+		}
+	}
+	return ansi.Truncate(brand, width, "")
 }

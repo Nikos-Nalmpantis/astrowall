@@ -460,6 +460,18 @@ func TestTUIModelNativeImagePositionAccountsForFavoriteMetadata(t *testing.T) {
 	}
 }
 
+func TestTUIModelNativeImagePositionAccountsForDashboardHeader(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Date: "2024-09-27", Title: "Recent", PreviewPath: "/preview.jpg"}}, nil, "KEY")
+	m.imageProtocol = imageProtocolWezTerm
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	_, y := m.nativeImagePosition()
+	want := headerLineCount + verticalOuterInset + m.detailStyle.GetBorderTopSize() + m.detailStyle.GetPaddingTop() + m.detailHeaderHeight(m.selectedRecord())
+	if y != want || y+m.previewArea.height > m.height-statusLineCount-verticalOuterInset {
+		t.Fatalf("image y=%d height=%d, want start %d inside %d rows", y, m.previewArea.height, want, m.height)
+	}
+}
+
 func TestTUIModelNativeImagePositionAccountsForWrappedTitle(t *testing.T) {
 	short := APODRecord{Date: "2024-09-27", Title: "Short", PreviewPath: "/preview.jpg"}
 	m := newTUIModel([]APODRecord{short}, nil, "KEY")
@@ -474,7 +486,7 @@ func TestTUIModelNativeImagePositionAccountsForWrappedTitle(t *testing.T) {
 	if wrappedY <= shortY {
 		t.Fatalf("wrapped title y = %d, short title y = %d", wrappedY, shortY)
 	}
-	if wrappedY+m.previewArea.height > verticalOuterInset+m.detailStyle.GetBorderTopSize()+m.detail.Height() {
+	if wrappedY+m.previewArea.height > headerLineCount+verticalOuterInset+m.detailStyle.GetBorderTopSize()+m.detail.Height() {
 		t.Fatalf("native image bottom %d exceeds detail content bottom", wrappedY+m.previewArea.height)
 	}
 }
@@ -631,7 +643,7 @@ func TestTUIModelUsesFixedPaneGapsAcrossResizes(t *testing.T) {
 			t.Fatalf("%dx%d total horizontal spacing = %d, want %d", size.Width, size.Height, got, horizontalOuterInset*2+horizontalInterPaneGap)
 		}
 
-		contentHeight := size.Height - statusLineCount - verticalOuterInset*2 - verticalInterPaneGap*2
+		contentHeight := size.Height - headerLineCount - statusLineCount - verticalOuterInset*2 - verticalInterPaneGap*2
 		listHeight := m.recentList.Height() + m.favoriteList.Height() + listVerticalFrame*2
 		if got := contentHeight - listHeight; got != verticalInterPaneGap {
 			t.Fatalf("%dx%d inter-pane vertical spacing = %d, want %d", size.Width, size.Height, got, verticalInterPaneGap)
@@ -710,17 +722,17 @@ func TestTUIModelUsesEqualOuterAndContentGaps(t *testing.T) {
 	m = updated.(tuiModel)
 	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
 
-	if strings.TrimSpace(lines[0]) != "" {
-		t.Fatalf("top inset = %q, want blank", lines[0])
+	if !strings.Contains(lines[0], "ASTROWALL") {
+		t.Fatalf("header = %q, want brand", lines[0])
 	}
-	if !strings.HasPrefix(lines[verticalOuterInset], strings.Repeat(" ", horizontalOuterInset)+"╔") {
-		t.Fatalf("first pane line = %q, want %d-cell left inset", lines[verticalOuterInset], horizontalOuterInset)
+	if !strings.HasPrefix(lines[headerLineCount+verticalOuterInset], strings.Repeat(" ", horizontalOuterInset)+"╔") {
+		t.Fatalf("first pane line = %q, want %d-cell left inset", lines[headerLineCount+verticalOuterInset], horizontalOuterInset)
 	}
 	if strings.TrimSpace(lines[len(lines)-1]) != "" {
 		t.Fatalf("bottom inset = %q, want blank", lines[len(lines)-1])
 	}
 
-	detailBottom := verticalOuterInset + lipgloss.Height(m.detailStyle.Render(m.detail.View()))
+	detailBottom := headerLineCount + verticalOuterInset + lipgloss.Height(m.detailStyle.Render(m.detail.View()))
 	if !strings.HasPrefix(lines[detailBottom+verticalInterPaneGap], strings.Repeat(" ", horizontalOuterInset)) {
 		t.Fatalf("status line = %q, want %d-cell left inset", lines[detailBottom+verticalInterPaneGap], horizontalOuterInset)
 	}
@@ -802,6 +814,59 @@ func TestNewTUIModelFromLibraryStartsWithCachedRecords(t *testing.T) {
 	}
 }
 
+func TestTUIHeaderCountsEntireLibraryAndUpdatesDuringSync(t *testing.T) {
+	db, err := openLibrary(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("openLibrary() error: %v", err)
+	}
+	defer db.Close()
+	for i := range 32 {
+		record := APODRecord{Date: fmt.Sprintf("2024-09-%02d", i+1), Title: "APOD", FetchedAt: time.Now()}
+		if i == 0 {
+			record.Favorite = true
+		}
+		if err := upsertAPOD(db, record); err != nil {
+			t.Fatalf("upsertAPOD() error: %v", err)
+		}
+	}
+	m, err := newTUIModelFromLibrary(db, AppPaths{}, "KEY", imageProtocolANSI, time.Now())
+	if err != nil {
+		t.Fatalf("newTUIModelFromLibrary() error: %v", err)
+	}
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	if got := ansi.Strip(m.renderDashboardHeader(76)); !strings.Contains(got, "LIBRARY 32") || !strings.Contains(got, "★ 1") {
+		t.Fatalf("header = %q, want full library and favorite counts", got)
+	}
+
+	if err := upsertAPOD(db, APODRecord{Date: "2024-10-01", Title: "New", FetchedAt: time.Now()}); err != nil {
+		t.Fatalf("upsertAPOD() error: %v", err)
+	}
+	if err := m.reloadRecords(); err != nil {
+		t.Fatalf("reloadRecords() error: %v", err)
+	}
+	if got := ansi.Strip(m.renderDashboardHeader(76)); !strings.Contains(got, "LIBRARY 33") {
+		t.Fatalf("header after sync = %q, want 33 items", got)
+	}
+}
+
+func TestTUIKeepsActionFeedbackVisibleWhileSyncProgresses(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Date: "2024-09-27", Title: "Recent"}}, nil, "KEY")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	m.syncing = true
+	m.status = "Wallpaper set to Recent"
+	updated, _ = m.Update(archiveSyncPreparedMsg{plan: archiveSyncPlan{Items: []APODResponse{{Date: "2024-09-28"}}}})
+	m = updated.(tuiModel)
+	view := ansi.Strip(m.View().Content)
+	if !strings.Contains(view, "Wallpaper set to Recent") || !strings.Contains(view, "Syncing APOD 1/1") {
+		t.Fatalf("action feedback and sync progress must coexist: %q", view)
+	}
+	if m.status != "Wallpaper set to Recent" {
+		t.Fatalf("action status overwritten by sync: %q", m.status)
+	}
+}
+
 func TestTUIModelAddsBackgroundSyncItemsIncrementally(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
@@ -850,8 +915,8 @@ func TestTUIModelAddsBackgroundSyncItemsIncrementally(t *testing.T) {
 	if len(model.recentRecords) != 2 || model.recentRecords[0].Title != "Second" {
 		t.Fatalf("recent records after final item = %#v", model.recentRecords)
 	}
-	if !strings.Contains(model.status, "Synced 2 APODs") {
-		t.Fatalf("status = %q", model.status)
+	if !strings.Contains(model.syncStatus, "Synced 2 APODs") {
+		t.Fatalf("sync status = %q", model.syncStatus)
 	}
 }
 
@@ -901,8 +966,8 @@ func TestTUIModelStopsBackgroundSyncAfterFatalItemFailure(t *testing.T) {
 
 	updated, cmd := m.Update(archiveItemSyncedMsg{date: "2024-09-26", err: os.ErrPermission})
 	m = updated.(tuiModel)
-	if cmd != nil || m.syncing || !strings.Contains(m.status, "Library sync failed for 2024-09-26") {
-		t.Fatalf("fatal failure state: syncing=%v status=%q cmd=%v", m.syncing, m.status, cmd)
+	if cmd != nil || m.syncing || !strings.Contains(m.syncStatus, "Library sync failed for 2024-09-26") {
+		t.Fatalf("fatal failure state: syncing=%v syncStatus=%q cmd=%v", m.syncing, m.syncStatus, cmd)
 	}
 }
 
@@ -918,8 +983,8 @@ func TestTUIModelReportsEmptyBackgroundSync(t *testing.T) {
 	if m.syncing {
 		t.Fatal("syncing = true after empty sync response")
 	}
-	if m.status != "Library sync returned no APODs" {
-		t.Fatalf("status = %q", m.status)
+	if m.syncStatus != "Library sync returned no APODs" {
+		t.Fatalf("sync status = %q", m.syncStatus)
 	}
 }
 

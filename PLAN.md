@@ -19,9 +19,12 @@ The desired direction is a **rich astronomy dashboard** with polished, usable vi
 
 **Done when:** the existing two-column browser looks more intentional, remains legible at supported sizes, and native previews remain aligned. This is a styling pass, not a new dashboard layout.
 
-### 2. Dashboard header and status — pending
+### 2. Dashboard header and status — complete
 
-Add a compact header with library/favorite counts and separate sync progress from action feedback. Keep WezTerm placement coordinates derived from layout. Verify layout at multiple sizes and during sync.
+- [x] Add a compact, width-aware header with total stored-library and favorite counts.
+- [x] Show sync progress and action feedback on separate lines so background updates do not hide user actions.
+- [x] Adjust WezTerm placement for the header and verify multi-size layout, counts during sync, and preview lifecycle.
+- [x] Collect feedback on the dashboard before starting responsive layout work.
 
 ### 3. Responsive layout and empty states — pending
 
@@ -48,3 +51,5 @@ Expose stored entries older than the newest 30, with useful search/navigation an
 For milestone 1, the claim is visual consistency without breaking sizing, navigation, or native image placement. Existing `tui_test.go` geometry and WezTerm lifecycle tests cover layout behavior; `go test ./...` and `go vet ./...` cover project integration. A real WezTerm visual check is still needed to judge the aesthetics and native-image appearance; automated tests cannot establish those perceptual details.
 
 Milestone 1 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `git diff --check` passed. User reviewed the look in WezTerm and approved it.
+
+Milestone 2 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `git diff --check` passed. Model tests cover full-library counts, progress/action coexistence, multiple window sizes, and WezTerm image position. User reviewed the dashboard in WezTerm and approved it.

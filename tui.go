@@ -126,6 +126,8 @@ type tuiModel struct {
 	pendingSavedKey  savedAPIKeyLoadedMsg
 	hasPendingKey    bool
 	status           string
+	syncStatus       string
+	libraryCount     int
 	width            int
 	height           int
 	ready            bool
@@ -194,7 +196,8 @@ func (t *commandTracker) closeAndWait() {
 }
 
 const (
-	statusLineCount        = 2
+	headerLineCount        = 1
+	statusLineCount        = 3
 	verticalOuterInset     = 1
 	verticalInterPaneGap   = 0
 	horizontalOuterInset   = 2
@@ -258,7 +261,8 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 		apiKey:          apiKey,
 		apiKeySource:    apiKeySourceDemo,
 		apiKeyInput:     keyInput,
-		status:          "j/k move • / search • tab switch pane • d description • enter set wallpaper • f favorite • o page • u media • ? help • q quit",
+		status:          "Select an APOD to explore or set as wallpaper",
+		libraryCount:    len(recentRecords),
 		activePane:      recentPane,
 		spinner:         spin,
 		nativeOutput:    newNativeImageOutput(io.Discard),
@@ -500,29 +504,29 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncStarted = true
 		if msg.err != nil {
 			m.syncing = false
-			m.status = fmt.Sprintf("Library sync failed: %v", msg.err)
+			m.syncStatus = fmt.Sprintf("Library sync failed: %v", msg.err)
 			return m, nil
 		}
 		if msg.plan.AlreadyUpToDate {
 			m.syncing = false
-			m.status = "Local APOD library is up to date"
+			m.syncStatus = "Local APOD library is up to date"
 			return m, nil
 		}
 		if len(msg.plan.Items) == 0 {
 			m.syncing = false
-			m.status = "Library sync returned no APODs"
+			m.syncStatus = "Library sync returned no APODs"
 			return m, nil
 		}
 		m.syncItems = msg.plan.Items
 		m.syncTotal = len(msg.plan.Items)
-		m.status = fmt.Sprintf("Syncing APOD 1/%d…", m.syncTotal)
+		m.syncStatus = fmt.Sprintf("Syncing APOD 1/%d…", m.syncTotal)
 		return m, m.syncArchiveItemCmd(m.syncItems[0])
 
 	case archiveItemSyncedMsg:
 		if msg.err != nil {
 			m.syncing = false
 			m.syncItems = nil
-			m.status = fmt.Sprintf("Library sync failed for %s: %v", msg.date, msg.err)
+			m.syncStatus = fmt.Sprintf("Library sync failed for %s: %v", msg.date, msg.err)
 			return m, m.requestNativeImage()
 		}
 		m.syncCompleted++
@@ -535,16 +539,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err := m.reloadRecords(); err != nil {
 			m.syncing = false
 			m.syncItems = nil
-			m.status = fmt.Sprintf("Library refresh failed: %v", err)
+			m.syncStatus = fmt.Sprintf("Library refresh failed: %v", err)
 			return m, nil
 		}
 		m.syncItems = m.syncItems[1:]
 		if len(m.syncItems) == 0 {
 			m.syncing = false
-			m.status = fmt.Sprintf("Synced %d APODs, cached %d previews, %d preview errors", m.syncCompleted, m.syncPreviewed, m.syncFailed)
+			m.syncStatus = fmt.Sprintf("Synced %d APODs, cached %d previews, %d preview errors", m.syncCompleted, m.syncPreviewed, m.syncFailed)
 			return m, m.requestNativeImage()
 		}
-		m.status = fmt.Sprintf("Syncing APOD %d/%d…", m.syncCompleted+1, m.syncTotal)
+		m.syncStatus = fmt.Sprintf("Syncing APOD %d/%d…", m.syncCompleted+1, m.syncTotal)
 		return m, tea.Batch(m.syncArchiveItemCmd(m.syncItems[0]), m.requestNativeImage())
 
 	case favoriteToggledMsg:
@@ -665,11 +669,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil && msg.apiKey != "" {
 			m.apiKey = msg.apiKey
 			m.apiKeySource = apiKeySourceCredential
-			m.status = "Saved NASA API key loaded • checking for new APODs…"
+			m.syncStatus = "Saved NASA API key loaded • checking for new APODs…"
 		} else if msg.err != nil {
 			m.status = fmt.Sprintf("Saved key unavailable; using DEMO_KEY: %v", msg.err)
 		} else {
-			m.status = "Using DEMO_KEY • checking for new APODs…"
+			m.syncStatus = "Using DEMO_KEY • checking for new APODs…"
 		}
 		return m, m.startArchiveSync()
 
@@ -738,7 +742,7 @@ func (m tuiModel) View() tea.View {
 	)
 
 	status := m.status
-	if m.loading || m.syncing {
+	if m.loading {
 		status = fmt.Sprintf("%s %s", m.spinner.View(), status)
 	}
 	if m.showHelp {
@@ -747,14 +751,24 @@ func (m tuiModel) View() tea.View {
 		status = "Enter validate/save • Ctrl+R remove saved key • Esc cancel"
 	}
 	lineWidth := max(1, m.width-horizontalOuterInset*2)
+	syncStatus := m.syncStatus
+	if syncStatus == "" {
+		syncStatus = "Library ready"
+	}
+	if m.syncing {
+		syncStatus = fmt.Sprintf("%s %s", m.spinner.View(), syncStatus)
+	}
+	syncStatus = ansi.Truncate(syncStatus, lineWidth, "")
 	status = ansi.Truncate(status, lineWidth, "")
 	helpLine := shortcutHints(lineWidth, m.activePaneLabel(), m.detailToggleLabel())
 	textInset := strings.Repeat(" ", horizontalOuterInset)
 
 	body := lipgloss.JoinVertical(
 		lipgloss.Left,
+		textInset+m.renderDashboardHeader(lineWidth),
 		layoutSpacer(verticalOuterInset),
 		panes,
+		textInset+styleStatus(syncStatus),
 		textInset+m.statusStyle.Render(styleStatus(status)),
 		textInset+m.helpStyle.Render(helpLine),
 		layoutSpacer(verticalOuterInset),
@@ -779,7 +793,7 @@ func (m *tuiModel) resize() {
 	listHorizontalFrame, listVerticalFrame := m.listStyle.GetFrameSize()
 	detailHorizontalFrame, detailVerticalFrame := m.detailStyle.GetFrameSize()
 
-	contentHeight := max(1, m.height-statusLineCount-verticalOuterInset*2-verticalInterPaneGap*2)
+	contentHeight := max(1, m.height-headerLineCount-statusLineCount-verticalOuterInset*2-verticalInterPaneGap*2)
 	availableWidth := max(2, m.width-horizontalOuterInset*2-horizontalInterPaneGap)
 	leftOuterWidth := availableWidth / 3
 	if m.width >= 40 {
@@ -875,7 +889,7 @@ func runTUI(db *sql.DB, paths AppPaths, apiKey string, source apiKeySource, look
 	model.lookupCredential = lookupCredential
 	model.syncStarted = !lookupCredential
 	if lookupCredential {
-		model.status = "Checking OS credential store for a saved NASA API key…"
+		model.syncStatus = "Checking OS credential store for a saved NASA API key…"
 	}
 	program := tea.NewProgram(model, tea.WithOutput(output))
 	finalModel, err := program.Run()
@@ -952,6 +966,10 @@ func newTUIModelFromLibrary(db *sql.DB, paths AppPaths, apiKey string, protocol 
 	model.imageProtocol = resolveImageProtocol(protocol, os.Getenv)
 	model.tmux = os.Getenv("TMUX") != ""
 	model.db = db
+	model.libraryCount, err = apodCount(db)
+	if err != nil {
+		return tuiModel{}, err
+	}
 	model.paths = paths
 	model.syncing = true
 	model.syncNow = now
@@ -961,7 +979,7 @@ func newTUIModelFromLibrary(db *sql.DB, paths AppPaths, apiKey string, protocol 
 	model.nativeKnown = make(map[uint32]struct{})
 	model.nativeOutput = newNativeImageOutput(io.Discard)
 	model.commands = &commandTracker{}
-	model.status = "Checking for new APODs…"
+	model.syncStatus = "Checking for new APODs…"
 	return model, nil
 }
 
@@ -989,7 +1007,7 @@ func (m tuiModel) nativeImagePosition() (int, int) {
 	detailX := horizontalOuterInset + leftOuterWidth + horizontalInterPaneGap
 	x := detailX + m.detailStyle.GetBorderLeftSize() + m.detailStyle.GetPaddingLeft()
 	headerLines := m.detailHeaderHeight(m.selectedRecord())
-	y := verticalOuterInset + m.detailStyle.GetBorderTopSize() + m.detailStyle.GetPaddingTop() + headerLines
+	y := headerLineCount + verticalOuterInset + m.detailStyle.GetBorderTopSize() + m.detailStyle.GetPaddingTop() + headerLines
 	return x, y
 }
 
@@ -1142,6 +1160,10 @@ func (m *tuiModel) reloadRecords() error {
 	}
 	m.recentRecords = recent
 	m.favoriteRecords = favorites
+	m.libraryCount, err = apodCount(m.db)
+	if err != nil {
+		return err
+	}
 	m.syncListItems()
 	selectListDate(&m.recentList, recentDate)
 	selectListDate(&m.favoriteList, favoriteDate)
