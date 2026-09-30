@@ -2,7 +2,7 @@
 
 A CLI tool that fetches [NASA's Astronomy Picture of the Day](https://apod.nasa.gov/) and sets it as your desktop wallpaper.
 
-Astrowall now also keeps a small local library in SQLite plus a preview-image cache, so startup can sync only missing APOD dates instead of re-fetching everything every time.
+Astrowall also keeps a local SQLite library with preview and full-image caches, an interactive astronomy dashboard, and persisted favorites. See [FEATURES.md](FEATURES.md) for the full feature inventory.
 
 ## Installation
 
@@ -106,6 +106,10 @@ On startup, astrowall now:
 
 By default, metadata is stored under your XDG data directory (usually `~/.local/share/astrowall/`) and preview/full image cache files are stored under your XDG cache directory (usually `~/.cache/astrowall/`).
 
+Wallpaper operations share the full-image cache across the CLI, TUI, and favorite cycling. Today and dated CLI requests reuse stored metadata; random requests still ask NASA to choose an APOD, then reuse its image if cached. When a full image is missing, the stored HD URL (or standard URL) is used without another metadata request.
+
+Downloads and copies to `--output` replace their destinations only after completing successfully. Interrupted transfers preserve existing images and leave no partial cache file; missing or empty cache files are downloaded again. Startup still attempts an incremental sync, but a sync failure only warns in wallpaper modes, so an already-cached wallpaper can be used offline.
+
 ## Text TUI Mode
 
 `astrowall --tui` launches the first interactive browser for the local APOD library.
@@ -131,6 +135,10 @@ Current behavior:
 - `p`: re-download the selected APOD's preview (including a cached one) without refreshing the entire library; reports when no preview URL is available
 - `Enter`: fetch the selected day's image and set it as wallpaper
 - `d`: toggle between the selected APOD image and description
+- `PgUp` / `PgDown` or `Ctrl+U` / `Ctrl+D`: scroll the description
+- `o`: open the selected APOD's NASA page in your browser
+- `u`: open the selected image or video URL
+- `?`: open keyboard help
 - `a`: add, replace, or remove the saved NASA API key
 
 In `auto` mode, direct WezTerm sessions use WezTerm's standard Kitty image placement support, while compatible Kitty and Ghostty sessions use Kitty Unicode placeholders. Other terminals use ANSI half-block output. Auto mode remains conservative inside tmux; force Kitty graphics with `--image-protocol kitty` after confirming support and enabling passthrough:

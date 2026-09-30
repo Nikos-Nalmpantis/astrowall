@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -173,8 +174,7 @@ func main() {
 
 	var apod APODResponse
 	for {
-		uri := buildAPODURL(key, random, date)
-		apod, err = fetchAPOD(uri)
+		apod, err = resolveWallpaperAPOD(db, key, random, date, time.Now())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error fetching APOD: %v\n", err)
 			os.Exit(1)
@@ -188,17 +188,17 @@ func main() {
 			continue
 		}
 
-		imageURL := apod.HDURL
-		if imageURL == "" {
-			imageURL = apod.URL
-		}
-
-		err = downloadImage(imageURL, imagePath)
+		cachedPath, err := ensureHDImageCached(db, paths, APODRecord{Date: apod.Date}, key)
 		if err != nil {
-			if random {
+			var localErr localImageError
+			if random && !errors.As(err, &localErr) {
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "Error downloading image: %v\n", err)
+			os.Exit(1)
+		}
+		if err := copyImageAtomic(cachedPath, imagePath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving image: %v\n", err)
 			os.Exit(1)
 		}
 		break

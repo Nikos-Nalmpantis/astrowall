@@ -269,6 +269,58 @@ func TestDownloadImageReplacesExistingFile(t *testing.T) {
 	}
 }
 
+func TestDownloadImageInterruptedResponsePreservesDestination(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.Write([]byte("partial image"))
+	}))
+	defer server.Close()
+	for _, existing := range []bool{false, true} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "wallpaper.jpg")
+		if existing {
+			if err := os.WriteFile(path, []byte("original"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := downloadImage(server.URL, path); err == nil {
+			t.Fatal("expected interrupted response to fail")
+		}
+		data, err := os.ReadFile(path)
+		if existing {
+			if err != nil || string(data) != "original" {
+				t.Fatalf("existing destination = %q, %v", data, err)
+			}
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("partial destination exists: %q, %v", data, err)
+		}
+		files, err := os.ReadDir(dir)
+		wantFiles := 0
+		if existing {
+			wantFiles = 1
+		}
+		if err != nil || len(files) != wantFiles {
+			t.Fatalf("temporary files leaked: %v, %v", files, err)
+		}
+	}
+}
+
+func TestDownloadImageEmptyResponsePreservesDestination(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "wallpaper.jpg")
+	if err := os.WriteFile(path, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := downloadImage(server.URL, path); err == nil {
+		t.Fatal("expected empty image response to fail")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "original" {
+		t.Fatalf("destination after empty response = %q, %v", data, err)
+	}
+}
+
 func TestPrintDetails(t *testing.T) {
 	// Smoke test: printDetails should not panic.
 	apod := APODResponse{

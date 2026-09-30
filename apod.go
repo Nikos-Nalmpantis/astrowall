@@ -148,7 +148,7 @@ func fetchAPODRangeContext(ctx context.Context, url string) ([]APODResponse, err
 }
 
 func downloadImage(url, path string) error {
-	return downloadImageContext(context.Background(), url, path)
+	return downloadImageAtomicContext(context.Background(), url, path)
 }
 
 func downloadImageContext(ctx context.Context, url, targetPath string) error {
@@ -167,12 +167,16 @@ func downloadImageContext(ctx context.Context, url, targetPath string) error {
 		return localImageError{err: fmt.Errorf("creating file: %w", err)}
 	}
 
-	if _, err := io.Copy(localImageWriter{Writer: file}, resp.Body); err != nil {
+	n, err := io.Copy(localImageWriter{Writer: file}, resp.Body)
+	if err != nil {
 		file.Close()
 		return fmt.Errorf("saving image: %w", err)
 	}
 	if err := file.Close(); err != nil {
 		return localImageError{err: fmt.Errorf("closing image: %w", err)}
+	}
+	if n == 0 {
+		return fmt.Errorf("image response was empty")
 	}
 	return nil
 }

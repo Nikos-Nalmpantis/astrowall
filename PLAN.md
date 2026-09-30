@@ -56,9 +56,18 @@ The desired direction is a **rich astronomy dashboard** with polished, usable vi
 - [x] Verify successful and failed retries, no-op refreshes, selection and native preview updates.
 - [x] Collect feedback on refresh and retry in WezTerm.
 
+### 7. Shared cache-first wallpaper operations — implemented, awaiting feedback
+
+- [x] Reuse stored metadata for today/dated CLI requests and share the full-image cache across CLI, TUI, and favorite cycling.
+- [x] Use stored image URLs before requesting metadata again; download missing/empty cache files again.
+- [x] Make full-image downloads and CLI output copies atomic, preserving existing files on interrupted transfers.
+- [x] Extract shared image-cache operations from `tui.go` into `image_cache.go`.
+- [ ] Collect feedback before starting the next milestone.
+
+**Done when:** cached wallpapers work without a new metadata/image request, unsuccessful transfers leave no partial cache files, and all wallpaper modes retain their existing controls.
+
 ## Later ideas
 
-- Cache-first and atomic full-image downloads across CLI and TUI.
 - Skip videos when cycling favorites.
 - Wallpaper history and scheduled rotation.
 - Extract shared wallpaper/cache operations and simplify repeated database row scanning where touched by a milestone.
@@ -80,3 +89,7 @@ Milestone 5 evidence: SQLite-backed model tests cover older entries beyond the R
 Milestone 6 evidence: local HTTP and SQLite model tests cover manual no-op and queued refreshes, retrying a failed preview through sync, selected older-Archive retry, and failed retry persistence. User confirmed `s` and the corrected `p` behavior in WezTerm.
 
 Feedback follow-up: `p` appeared inert after `s` because it accepted only entries with a stored preview error. It now refreshes any selected APOD with a preview URL, replaces cached files atomically, invalidates rendered-image caches, and shows feedback in the smallest layout. Tests cover a successful cached refresh, a failed refresh preserving the cached file, and a missing URL.
+
+Milestone 7 evidence: local HTTP/SQLite tests cover metadata/full-image reuse, random-image reuse, offline today/dated requests, atomic CLI output copies, interrupted transfers with and without existing destinations, retry after failure, empty-cache repair, and cached-video rejection. These checks establish cache/file behavior; desktop wallpaper application and Windows/macOS filesystem behavior require platform-specific testing.
+
+Milestone 7 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `git diff --check` passed. Feature inventory added in `FEATURES.md`. Awaiting user feedback.

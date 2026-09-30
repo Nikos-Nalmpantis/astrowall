@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -1656,50 +1655,6 @@ func toggleFavoriteCmd(db *sql.DB, date string) tea.Cmd {
 		return favoriteToggledMsg{date: date, title: record.Title, favorite: favorite, err: err}
 	}
 }
-func ensureHDImageCached(db *sql.DB, paths AppPaths, record APODRecord, apiKey string) (string, error) {
-	storedRecord, err := recordByDate(db, record.Date)
-	if err == nil {
-		record = storedRecord
-	}
-
-	if record.HDPath != "" {
-		if _, err := os.Stat(record.HDPath); err == nil {
-			return record.HDPath, nil
-		}
-	}
-
-	apod, err := fetchAPOD(buildAPODURL(apiKey, false, record.Date))
-	if err != nil {
-		return "", err
-	}
-	if apod.MediaType != "image" {
-		return "", fmt.Errorf("%s is a %s, not an image", record.Date, apod.MediaType)
-	}
-
-	imageURL := apod.HDURL
-	if imageURL == "" {
-		imageURL = apod.URL
-	}
-	if imageURL == "" {
-		return "", fmt.Errorf("no downloadable image URL for %s", record.Date)
-	}
-
-	fullPath := filepath.Join(paths.FullDir, record.Date+fileExtensionFromURL(imageURL))
-	if _, err := os.Stat(fullPath); err != nil {
-		if !os.IsNotExist(err) {
-			return "", fmt.Errorf("checking HD cache for %s: %w", record.Date, err)
-		}
-		if err := downloadImage(imageURL, fullPath); err != nil {
-			return "", err
-		}
-	}
-
-	if err := updateHDPath(db, record.Date, fullPath); err != nil {
-		return "", err
-	}
-	return fullPath, nil
-}
-
 func (m *tuiModel) syncSingleList(target *list.Model, records []APODRecord) {
 	items := make([]list.Item, 0, len(records))
 	for _, record := range records {
