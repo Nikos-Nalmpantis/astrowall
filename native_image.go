@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"image"
 	"image/png"
 	"strings"
 	"sync/atomic"
@@ -109,7 +110,7 @@ func prepareKittyImageContext(ctx context.Context, path string, width, height in
 	if err := ctx.Err(); err != nil {
 		return nativeImage{}, err
 	}
-	image = imaging.Fit(image, width*8, height*16, imaging.Lanczos)
+	image = fitNativePreview(image, width, height)
 	var pngData bytes.Buffer
 	if err := png.Encode(&pngData, image); err != nil {
 		return nativeImage{}, fmt.Errorf("encoding Kitty preview: %w", err)
@@ -165,7 +166,7 @@ func prepareWezTermImageContext(ctx context.Context, path string, width, height,
 	if err != nil {
 		return nativeImage{}, err
 	}
-	image = imaging.Fit(image, width*8, height*16, imaging.Lanczos)
+	image = fitNativePreview(image, width, height)
 	var pngData bytes.Buffer
 	if err := png.Encode(&pngData, image); err != nil {
 		return nativeImage{}, fmt.Errorf("encoding WezTerm preview: %w", err)
@@ -199,6 +200,13 @@ func prepareWezTermImageContext(ctx context.Context, path string, width, height,
 		placement:    placement,
 		placeholders: blankImageGrid(width, height),
 	}, nil
+}
+
+// Place the fitted image on a transparent cell-sized canvas so c/r placement
+// does not stretch portrait and panoramic APODs back to the pane dimensions.
+func fitNativePreview(source image.Image, width, height int) image.Image {
+	canvas := image.NewNRGBA(image.Rect(0, 0, width*8, height*16))
+	return imaging.PasteCenter(canvas, imaging.Fit(source, width*8, height*16, imaging.Lanczos))
 }
 
 func blankImageGrid(width, height int) string {

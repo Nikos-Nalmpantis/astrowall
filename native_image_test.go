@@ -149,3 +149,33 @@ func TestPrepareWezTermImageBuildsPositionedPlacement(t *testing.T) {
 		t.Fatalf("blank grid dimensions = %dx%d", lipgloss.Width(native.placeholders), lipgloss.Height(native.placeholders))
 	}
 }
+
+func TestFitNativePreviewCentersImageOnCellSizedCanvas(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		w, h  int
+		point image.Point
+	}{
+		{"portrait", 8, 32, image.Pt(32, 32)},
+		{"panorama", 32, 8, image.Pt(32, 32)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := image.NewRGBA(image.Rect(0, 0, tc.w, tc.h))
+			for y := range tc.h {
+				for x := range tc.w {
+					source.Set(x, y, color.RGBA{R: 255, A: 255})
+				}
+			}
+			fitted := fitNativePreview(source, 8, 4)
+			if fitted.Bounds().Dx() != 64 || fitted.Bounds().Dy() != 64 {
+				t.Fatalf("canvas size = %v", fitted.Bounds())
+			}
+			if _, _, _, a := fitted.At(0, 0).RGBA(); a != 0 {
+				t.Fatal("letterbox should be transparent")
+			}
+			if _, _, _, a := fitted.At(tc.point.X, tc.point.Y).RGBA(); a == 0 {
+				t.Fatalf("center %v should contain the image", tc.point)
+			}
+		})
+	}
+}

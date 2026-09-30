@@ -349,13 +349,117 @@ func TestTUIModelActivatesAndClearsNativePreview(t *testing.T) {
 	}
 }
 
-func TestTUIModelANSIProtocolDoesNotRequestNativePreview(t *testing.T) {
+func TestTUIModelANSIProtocolRequestsPreviewWithoutNativeImage(t *testing.T) {
 	m := newTUIModel([]APODRecord{{Date: "2024-09-27", PreviewPath: "/preview.jpg"}}, nil, "KEY")
 	m.imageProtocol = imageProtocolANSI
 	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = updated.(tuiModel)
+	if cmd == nil || m.nativeRequest != "" || m.ansiKey == "" {
+		t.Fatalf("ANSI resize command = %v, native request = %q, ANSI key = %q", cmd, m.nativeRequest, m.ansiKey)
+	}
+}
+
+func TestTUIANSIRequestsAreAsynchronousAndIgnoreStaleResults(t *testing.T) {
+	records := []APODRecord{
+		{Date: "2024-09-27", Title: "First", PreviewPath: "/first.jpg"},
+		{Date: "2024-09-26", Title: "Second", PreviewPath: "/second.jpg"},
+	}
+	m := newTUIModel(records, nil, "KEY")
+	m.imageProtocol = imageProtocolANSI
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	firstKey, firstGeneration := m.ansiKey, m.ansiGeneration
+	if cmd == nil || !strings.Contains(m.detail.View(), "Preparing image preview") {
+		t.Fatalf("initial preview must be deferred; cmd=%v detail=%q", cmd, m.detail.View())
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "j", Code: 'j'})
+	m = updated.(tuiModel)
+	secondKey := m.ansiKey
+	if secondKey == firstKey || m.ansiGeneration == firstGeneration {
+		t.Fatalf("navigation did not replace request: old=%q new=%q", firstKey, secondKey)
+	}
+	updated, _ = m.Update(ansiPreviewPreparedMsg{key: firstKey, generation: firstGeneration, preview: "STALE PREVIEW"})
+	m = updated.(tuiModel)
+	if strings.Contains(m.detail.View(), "STALE PREVIEW") {
+		t.Fatalf("stale image shown: %q", m.detail.View())
+	}
+	updated, _ = m.Update(ansiPreviewPreparedMsg{key: secondKey, generation: m.ansiGeneration, preview: "CURRENT PREVIEW"})
+	m = updated.(tuiModel)
+	if !strings.Contains(m.detail.View(), "CURRENT PREVIEW") {
+		t.Fatalf("current preview missing: %q", m.detail.View())
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "d", Code: 'd'})
+	m = updated.(tuiModel)
+	if m.ansiKey != "" || strings.Contains(m.detail.View(), "CURRENT PREVIEW") {
+		t.Fatalf("description retained ANSI image: key=%q detail=%q", m.ansiKey, m.detail.View())
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "d", Code: 'd'})
+	m = updated.(tuiModel)
+	if !strings.Contains(m.detail.View(), "CURRENT PREVIEW") || m.ansiKey != secondKey {
+		t.Fatalf("cached ANSI image not reused: key=%q detail=%q", m.ansiKey, m.detail.View())
+	}
+}
+
+func TestTUIANSIResizeRejectsOldResultAndReusesCacheBySize(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Date: "2024-09-27", PreviewPath: "/preview.jpg"}}, nil, "KEY")
+	m.imageProtocol = imageProtocolANSI
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	oldKey := m.ansiKey
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(tuiModel)
+	if m.ansiKey == oldKey {
+		t.Fatal("resize must request new preview dimensions")
+	}
+	updated, _ = m.Update(ansiPreviewPreparedMsg{key: oldKey, generation: m.ansiGeneration - 1, preview: "OLD SIZE"})
+	m = updated.(tuiModel)
+	if strings.Contains(m.detail.View(), "OLD SIZE") {
+		t.Fatal("old-size image displayed")
+	}
+	updated, _ = m.Update(ansiPreviewPreparedMsg{key: m.ansiKey, generation: m.ansiGeneration, preview: "NEW SIZE"})
+	m = updated.(tuiModel)
+	if !strings.Contains(m.detail.View(), "NEW SIZE") {
+		t.Fatal("new-size image not displayed")
+	}
+}
+
+func TestTUIANSIRejectsOldGenerationAfterReturningToSameSelection(t *testing.T) {
+	m := newTUIModel([]APODRecord{
+		{Date: "2024-09-27", PreviewPath: "/first.jpg"},
+		{Date: "2024-09-26", PreviewPath: "/second.jpg"},
+	}, nil, "KEY")
+	m.imageProtocol = imageProtocolANSI
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	oldKey, oldGeneration := m.ansiKey, m.ansiGeneration
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "j", Code: 'j'})
+	m = updated.(tuiModel)
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "k", Code: 'k'})
+	m = updated.(tuiModel)
+	if m.ansiKey != oldKey || m.ansiGeneration == oldGeneration {
+		t.Fatalf("expected new generation for same key: key=%q generation=%d", m.ansiKey, m.ansiGeneration)
+	}
+	updated, _ = m.Update(ansiPreviewPreparedMsg{key: oldKey, generation: oldGeneration, preview: "OLD REQUEST"})
+	m = updated.(tuiModel)
+	if strings.Contains(m.detail.View(), "OLD REQUEST") {
+		t.Fatal("old request applied after returning to same selection")
+	}
+}
+
+func TestTUIWezTermPreparationFailureFallsBackWithoutRetryLoop(t *testing.T) {
+	m := newTUIModel([]APODRecord{{Date: "2024-09-27", PreviewPath: "/preview.jpg"}}, nil, "KEY")
+	m.imageProtocol = imageProtocolWezTerm
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
+	updated, cmd := m.Update(nativeImagePreparedMsg{key: m.nativeRequest, err: os.ErrNotExist})
+	m = updated.(tuiModel)
+	if cmd == nil || m.nativeImageWanted() || m.ansiKey == "" || m.nativeRequest != "" {
+		t.Fatalf("fallback state: cmd=%v native=%t ansi=%q request=%q", cmd, m.nativeImageWanted(), m.ansiKey, m.nativeRequest)
+	}
+	updated, cmd = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(tuiModel)
 	if cmd != nil || m.nativeRequest != "" {
-		t.Fatalf("ANSI resize command = %v, native request = %q", cmd, m.nativeRequest)
+		t.Fatalf("unchanged failed preview retried: cmd=%v native=%q", cmd, m.nativeRequest)
 	}
 }
 
@@ -428,7 +532,7 @@ func TestTUIModelWezTermCleanupDeletesPlacement(t *testing.T) {
 	}
 }
 
-func TestTUIModelRetriesNativePreviewAfterPreparationError(t *testing.T) {
+func TestTUIModelFallsBackToANSIOnNativePreparationError(t *testing.T) {
 	record := APODRecord{Date: "2024-09-27", PreviewPath: "/preview.jpg"}
 	m := newTUIModel([]APODRecord{record}, nil, "KEY")
 	m.imageProtocol = imageProtocolWezTerm
@@ -441,8 +545,11 @@ func TestTUIModelRetriesNativePreviewAfterPreparationError(t *testing.T) {
 	if m.nativeTarget != "" {
 		t.Fatalf("native target = %q after preparation error", m.nativeTarget)
 	}
-	if cmd := m.requestNativeImage(); cmd == nil {
-		t.Fatal("native retry command = nil")
+	if m.nativeFallback == "" || m.ansiKey == "" {
+		t.Fatal("native failure did not start ANSI fallback")
+	}
+	if cmd := m.requestNativeImage(); cmd != nil {
+		t.Fatal("native failure immediately retried instead of preserving ANSI fallback")
 	}
 }
 

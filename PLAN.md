@@ -33,9 +33,13 @@ The desired direction is a **rich astronomy dashboard** with polished, usable vi
 - [x] Verify filtering, pane switching, native image cleanup and placement, and bounds at representative sizes.
 - [x] Collect feedback on the responsive layout in WezTerm.
 
-### 4. Image presentation and responsiveness — pending
+### 4. Image presentation and responsiveness — complete
 
-Keep ANSI previews proportional and centered; prepare expensive previews without blocking navigation; disregard stale results. Verify portrait/panorama rendering, resize, and rapid selection changes. Check the final appearance in direct WezTerm.
+- [x] Preserve proportions and center portrait/panoramic images in ANSI and native Kitty/WezTerm panes.
+- [x] Prepare ANSI previews asynchronously with a bounded six-entry cache; discard canceled or stale results after navigation, mode changes, and resize.
+- [x] Fall back to ANSI if native image preparation fails without retrying the same failed placement on every frame.
+- [x] Verify preview geometry, lifecycle, rapid navigation, and resize with tests and project checks.
+- [x] Collect visual feedback in direct WezTerm.
 
 ### 5. Full-library browsing — pending
 
@@ -58,3 +62,5 @@ Milestone 1 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and 
 Milestone 2 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `git diff --check` passed. Model tests cover full-library counts, progress/action coexistence, multiple window sizes, and WezTerm image position. User reviewed the dashboard in WezTerm and approved it.
 
 Milestone 3 evidence: model tests exercise wide, compact, stacked, and list-only layouts, selection and search across pane switches, bounds, and native-image invalidation after resizing. User reviewed the responsive layout in WezTerm and approved it.
+
+Milestone 4 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `git diff --check` passed. Tests cover letterboxing, asynchronous preparation, cached reuse, stale generation rejection, resize, and fallback. User reviewed the previews in WezTerm and approved them.

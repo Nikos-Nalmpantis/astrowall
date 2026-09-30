@@ -132,6 +132,8 @@ Current behavior:
 
 In `auto` mode, direct WezTerm sessions use WezTerm's standard Kitty image placement support, while compatible Kitty and Ghostty sessions use Kitty Unicode placeholders. Other terminals use ANSI half-block output. Auto mode remains conservative inside tmux; force Kitty graphics with `--image-protocol kitty` after confirming support and enabling passthrough:
 
+Previews are fitted and centered without stretching. ANSI previews render in the background while you continue browsing, and native preview errors fall back to ANSI for the selected item.
+
 ```tmux
 set -g allow-passthrough on
 ```

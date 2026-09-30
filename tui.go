@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -87,6 +88,18 @@ type nativeImageActivatedMsg struct {
 	key   string
 }
 
+type ansiPreviewPreparedMsg struct {
+	key        string
+	generation uint64
+	preview    string
+	err        error
+}
+
+type ansiPreviewResult struct {
+	preview string
+	err     error
+}
+
 type apiKeySavedMsg struct {
 	apiKey string
 	err    error
@@ -155,6 +168,13 @@ type tuiModel struct {
 	cancelSync       context.CancelFunc
 	commands         *commandTracker
 	nativeOutput     *nativeImageOutput
+	ansiKey          string
+	ansiGeneration   uint64
+	ansiResult       ansiPreviewResult
+	ansiCache        map[string]ansiPreviewResult
+	ansiCacheOrder   []string
+	cancelANSI       context.CancelFunc
+	nativeFallback   string
 	activePane       activePane
 	searchOriginal   [2]string
 	spinner          spinner.Model
@@ -494,7 +514,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncListItems()
 		m.refreshDetail(false)
 		m.status = fmt.Sprintf("Wallpaper set to %s", msg.title)
-		return m, nil
+		return m, m.requestNativeImage()
 
 	case urlOpenedMsg:
 		if msg.err != nil {
@@ -587,10 +607,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case nativeImagePreparedMsg:
 		if msg.key != m.nativeRequest || msg.err != nil || !m.nativeImageWanted() {
-			if msg.err != nil && msg.key == m.nativeRequest {
+			if msg.err != nil && msg.key == m.nativeRequest && m.nativeImageWanted() {
 				m.nativeRequest = ""
 				m.nativeTarget = ""
 				m.status = fmt.Sprintf("Native preview unavailable; using ANSI: %v", msg.err)
+				m.nativeFallback = m.ansiPreviewKey()
+				return m, m.requestANSIPreview()
 			}
 			return m, nil
 		}
@@ -619,6 +641,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Raw(kittyDeleteImage(msg.image.id, m.tmux))
 		}
 		m.nativeImage = msg.image
+		m.refreshDetail(false)
+		return m, nil
+
+	case ansiPreviewPreparedMsg:
+		if msg.generation != m.ansiGeneration || msg.key != m.ansiKey || !m.ansiPreviewWanted() || errors.Is(msg.err, context.Canceled) {
+			return m, nil
+		}
+		m.ansiResult = ansiPreviewResult{preview: msg.preview, err: msg.err}
+		if msg.err == nil {
+			m.cacheANSIPreview(msg.key, m.ansiResult)
+		}
 		m.refreshDetail(false)
 		return m, nil
 
@@ -912,10 +945,18 @@ func (m *tuiModel) refreshDetail(resetScroll bool) {
 	} else if record.PreviewPath != "" && m.nativeImageMatches(record.PreviewPath) {
 		parts = append(parts, m.nativeImage.placeholders)
 	} else if record.PreviewPath != "" {
-		if preview, err := renderPreviewBlock(record.PreviewPath, m.previewArea.width, m.previewArea.height); err == nil && preview != "" {
-			parts = append(parts, preview)
-		} else {
+		key := m.ansiPreviewKey()
+		result := m.ansiResult
+		if m.ansiKey != key {
+			result = m.ansiCache[key]
+		}
+		switch {
+		case result.preview != "":
+			parts = append(parts, result.preview)
+		case result.err != nil:
 			parts = append(parts, "Preview unavailable. Press d to read the description or u to open the media.")
+		default:
+			parts = append(parts, "Preparing image preview…")
 		}
 	}
 	wrappedContent := wordwrap.String(strings.Join(parts, "\n"), max(20, m.detail.Width()))
@@ -981,8 +1022,10 @@ func runTUI(db *sql.DB, paths AppPaths, apiKey string, source apiKeySource, look
 	final, hasFinalModel := finalModel.(tuiModel)
 	if hasFinalModel {
 		final.cancelNativeImage()
+		final.cancelANSIPreview()
 	} else {
 		model.cancelNativeImage()
+		model.cancelANSIPreview()
 	}
 	model.commands.closeAndWait()
 	if hasFinalModel && final.allNativeDeleteSequence() != "" {
@@ -1063,13 +1106,76 @@ func newTUIModelFromLibrary(db *sql.DB, paths AppPaths, apiKey string, protocol 
 	model.nativeKnown = make(map[uint32]struct{})
 	model.nativeOutput = newNativeImageOutput(io.Discard)
 	model.commands = &commandTracker{}
+	model.ansiCache = make(map[string]ansiPreviewResult)
 	model.syncStatus = "Checking for new APODs…"
 	return model, nil
 }
 
 func (m tuiModel) nativeImageWanted() bool {
 	record := m.selectedRecord()
-	return !m.minimalLayout() && (m.imageProtocol == imageProtocolKitty || m.imageProtocol == imageProtocolWezTerm) && !m.showDescription && !m.showHelp && !m.showAPIKeyInput && !m.activeList().SettingFilter() && record.PreviewPath != "" && m.previewArea.width > 0 && m.previewArea.height > 0
+	return !m.minimalLayout() && (m.imageProtocol == imageProtocolKitty || m.imageProtocol == imageProtocolWezTerm) && !m.showDescription && !m.showHelp && !m.showAPIKeyInput && !m.activeList().SettingFilter() && record.PreviewPath != "" && m.previewArea.width > 0 && m.previewArea.height > 0 && m.nativeFallback != m.ansiPreviewKey()
+}
+
+func (m tuiModel) ansiPreviewKey() string {
+	record := m.selectedRecord()
+	return fmt.Sprintf("%s:%dx%d", record.PreviewPath, m.previewArea.width, m.previewArea.height)
+}
+
+func (m tuiModel) ansiPreviewWanted() bool {
+	record := m.selectedRecord()
+	return !m.minimalLayout() && !m.showDescription && !m.showHelp && !m.showAPIKeyInput && !m.activeList().SettingFilter() && record.PreviewPath != "" && m.previewArea.width >= 2 && m.previewArea.height >= 2 &&
+		(m.imageProtocol == imageProtocolANSI || m.nativeFallback == m.ansiPreviewKey())
+}
+
+func (m *tuiModel) requestANSIPreview() tea.Cmd {
+	if !m.ansiPreviewWanted() {
+		m.cancelANSIPreview()
+		m.ansiKey = ""
+		m.ansiResult = ansiPreviewResult{}
+		return nil
+	}
+	key := m.ansiPreviewKey()
+	if key == m.ansiKey {
+		return nil
+	}
+	m.cancelANSIPreview()
+	m.ansiKey = key
+	m.ansiGeneration++
+	if cached, ok := m.ansiCache[key]; ok {
+		m.ansiResult = cached
+		return nil
+	}
+	m.ansiResult = ansiPreviewResult{}
+	path, width, height := m.selectedRecord().PreviewPath, m.previewArea.width, m.previewArea.height
+	generation := m.ansiGeneration
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelANSI = cancel
+	return m.trackCmd(func() tea.Msg {
+		preview, err := renderPreviewBlockContext(ctx, path, width, height)
+		return ansiPreviewPreparedMsg{key: key, generation: generation, preview: preview, err: err}
+	})
+}
+
+func (m *tuiModel) cacheANSIPreview(key string, result ansiPreviewResult) {
+	const maxCachedPreviews = 6
+	if m.ansiCache == nil {
+		m.ansiCache = make(map[string]ansiPreviewResult)
+	}
+	if _, ok := m.ansiCache[key]; !ok {
+		m.ansiCacheOrder = append(m.ansiCacheOrder, key)
+	}
+	m.ansiCache[key] = result
+	if len(m.ansiCacheOrder) > maxCachedPreviews {
+		delete(m.ansiCache, m.ansiCacheOrder[0])
+		m.ansiCacheOrder = m.ansiCacheOrder[1:]
+	}
+}
+
+func (m *tuiModel) cancelANSIPreview() {
+	if m.cancelANSI != nil {
+		m.cancelANSI()
+		m.cancelANSI = nil
+	}
 }
 
 func (m tuiModel) nativeImageKey() string {
@@ -1124,12 +1230,17 @@ func (m tuiModel) detailHeader(record APODRecord) []string {
 func (m *tuiModel) requestNativeImage() tea.Cmd {
 	key := m.nativeImageKey()
 	if key == "" {
-		return m.clearNativeImage()
+		var cleanup tea.Cmd
+		if m.nativeRequest != "" || m.nativeImage.id != 0 || len(m.nativePending) > 0 {
+			cleanup = m.clearNativeImage()
+		}
+		return tea.Batch(cleanup, m.requestANSIPreview())
 	}
 	if key == m.nativeTarget {
-		return nil
+		return m.requestANSIPreview()
 	}
 	cleanup := m.clearNativeImage()
+	m.nativeFallback = ""
 	if m.cancelNative != nil {
 		m.cancelNative()
 	}
@@ -1153,6 +1264,9 @@ func (m *tuiModel) requestNativeImage() tea.Cmd {
 }
 
 func (m *tuiModel) clearNativeImage() tea.Cmd {
+	m.cancelANSIPreview()
+	m.ansiKey = ""
+	m.ansiResult = ansiPreviewResult{}
 	m.nativeRequest = ""
 	m.nativeTarget = ""
 	if m.cancelNative != nil {
