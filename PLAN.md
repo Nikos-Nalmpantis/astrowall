@@ -8,6 +8,8 @@ Astrowall fetches NASA's Astronomy Picture of the Day and sets it as a desktop w
 
 The desired direction is a **rich astronomy dashboard** with polished, usable visuals. The primary terminal is **WezTerm directly, without tmux**. Keep the preview prominent and preserve native-image positioning and cleanup as the interface evolves.
 
+The current feature inventory is maintained in [FEATURES.md](FEATURES.md). The next sequence is detail polish, wallpaper history, reliable image-only cycling, historical backfill, and scheduled rotation.
+
 ## Milestones
 
 ### 1. Visual foundation — complete
@@ -66,11 +68,63 @@ The desired direction is a **rich astronomy dashboard** with polished, usable vi
 
 **Done when:** cached wallpapers work without a new metadata/image request, unsuccessful transfers leave no partial cache files, and all wallpaper modes retain their existing controls.
 
-## Later ideas
+### 8. Dashboard detail polish — complete
 
-- Skip videos when cycling favorites.
-- Wallpaper history and scheduled rotation.
-- Extract shared wallpaper/cache operations and simplify repeated database row scanning where touched by a milestone.
+- [x] Refine the title and compact date/type/favorite metadata in the selected APOD detail pane.
+- [x] Add preview/full-image cache indicators and copyright attribution when available.
+- [x] Extract detail presentation into `tui_detail.go`; keep the image prominent across responsive layouts.
+- [x] Verify metadata states, long-title sizing, and native-image placement; run project checks.
+- [x] Collect visual feedback in direct WezTerm before starting history work.
+
+**Done when:** the detail pane is more informative and visually polished without crowding the preview or misaligning native images.
+
+### 9. Wallpaper history and last-applied indicator
+
+- [ ] Record successful wallpaper applications across CLI, TUI, and favorite cycling through shared application logic.
+- [ ] Add a searchable history view and allow cached reapplication.
+- [ ] Show the last wallpaper applied by Astrowall; do not imply tracking external desktop changes.
+- [ ] Verify persistence, ordering, missing-cache recovery, and exclusion of failed applications.
+- [ ] Collect feedback on history browsing and the last-applied indicator.
+
+**Done when:** previous wallpapers can be found and reapplied, with an accurate record of Astrowall's last successful change.
+
+### 10. Reliable image-only favorite cycling
+
+- [ ] Skip videos during wallpaper cycling while retaining them in Favorites for browsing.
+- [ ] Explain empty and video-only favorites clearly.
+- [ ] Preserve deterministic ordering and wraparound; advance the saved position only after successful application.
+- [ ] Verify mixed-media favorites, removed favorites, wraparound, and failed applications.
+- [ ] Collect feedback before starting archive backfill.
+
+**Done when:** a favorited video can no longer block wallpaper cycling.
+
+### 11. Historical archive backfill
+
+- [ ] Add an explicit way to fetch older APOD dates; distinguish the local Archive from NASA's full history.
+- [ ] Use bounded, resumable batches with visible progress and cancellation.
+- [ ] Preserve existing favorites, cache paths, searches, and selections.
+- [ ] Extract sync orchestration and simplify database scanning only where backfill requires it.
+- [ ] Verify interrupted/resumed imports, duplicate dates, API failures, and Archive updates.
+- [ ] Collect feedback on growing and browsing the historical library.
+
+**Done when:** the local archive can intentionally grow beyond its initial 30-day window without losing existing library state.
+
+### 12. Scheduled favorite rotation
+
+- [ ] Choose the scheduling approach with the user before implementation.
+- [ ] Support a configurable interval using verified image-only favorite cycling.
+- [ ] Define start/stop, restart, and failure behavior.
+- [ ] Verify scheduling and recovery using controlled time, then check the chosen desktop integration.
+- [ ] Collect feedback on configuring and stopping rotation.
+
+**Done when:** favorite rotation runs predictably and is easy to configure and stop.
+
+## Refactoring alongside milestones
+
+- Extract detail presentation during milestone 8.
+- Centralize successful wallpaper application and history recording during milestone 9.
+- Simplify repeated database row scanning where history/backfill touches it.
+- Extract sync orchestration as historical backfill requires it; keep broader TUI lifecycle refactoring tied to concrete changes.
 
 ## Verification notes
 
@@ -93,3 +147,7 @@ Feedback follow-up: `p` appeared inert after `s` because it accepted only entrie
 Milestone 7 evidence: local HTTP/SQLite tests cover metadata/full-image reuse, random-image reuse, offline today/dated requests, atomic CLI output copies, interrupted transfers with and without existing destinations, retry after failure, empty-cache repair, and cached-video rejection. These checks establish cache/file behavior; desktop wallpaper application and Windows/macOS filesystem behavior require platform-specific testing.
 
 Milestone 7 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `git diff --check` passed. Feature inventory added in `FEATURES.md`. Awaiting user feedback.
+
+Milestone 8 evidence: model tests cover cached/uncached/error/video metadata, favorite badges without adding image-header rows, long multilingual titles, compact/stacked/wide window bounds, full-image cache feedback, and attribution/error details in description view. Native-image coordinates are checked against the actual rendered header boundary. Titles use at most two rows (one in short panes); attribution yields space to previews in short panes. Cache indicators reflect recorded paths rather than checking disk on every render. A direct WezTerm visual review is still required for aesthetics and native-image appearance.
+
+Milestone 8 checks: `go test ./...`, `go test -race ./...`, `go vet ./...`, and `git diff --check` passed. User reviewed the dashboard and approved the look before milestone 9.

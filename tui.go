@@ -1073,49 +1073,6 @@ func (m *tuiModel) resize() {
 	m.refreshDetail(false)
 }
 
-func (m *tuiModel) refreshDetail(resetScroll bool) {
-	record := m.selectedRecord()
-	if record.Date == "" {
-		m.previewArea.height = 0
-		m.detail.SetContent(m.emptyDetailMessage())
-		if resetScroll {
-			m.detail.GotoTop()
-		}
-		return
-	}
-	m.previewArea.height = max(0, m.detail.Height()-m.detailHeaderHeight(record))
-
-	parts := m.detailHeader(record)
-	if m.descriptionVisible() {
-		if record.PreviewPath == "" {
-			parts = append(parts, "", secondaryText.Render("Preview unavailable · showing description"))
-		}
-		parts = append(parts, "", accentText.Bold(true).Render("Description"), "", strings.TrimSpace(record.Description))
-	} else if record.PreviewPath != "" && m.nativeImageMatches(record.PreviewPath) {
-		parts = append(parts, m.nativeImage.placeholders)
-	} else if record.PreviewPath != "" {
-		key := m.ansiPreviewKey()
-		result := m.ansiResult
-		if m.ansiKey != key {
-			result = m.ansiCache[key]
-		}
-		switch {
-		case result.preview != "":
-			parts = append(parts, result.preview)
-		case result.err != nil:
-			parts = append(parts, "Preview unavailable. Press d to read the description or u to open the media.")
-		default:
-			parts = append(parts, "Preparing image preview…")
-		}
-	}
-	wrappedContent := wordwrap.String(strings.Join(parts, "\n"), max(20, m.detail.Width()))
-
-	m.detail.SetContent(wrappedContent)
-	if resetScroll {
-		m.detail.GotoTop()
-	}
-}
-
 func (m tuiModel) emptyDetailMessage() string {
 	if m.activeList().IsFiltered() {
 		return "No matches in " + m.activePaneLabel() + ". Press Esc to clear the search."
@@ -1358,25 +1315,6 @@ func (m tuiModel) nativeImagePosition() (int, int) {
 	headerLines := m.detailHeaderHeight(m.selectedRecord())
 	y := detailY + m.detailStyle.GetBorderTopSize() + m.detailStyle.GetPaddingTop() + headerLines
 	return x, y
-}
-
-func (m tuiModel) detailHeaderHeight(record APODRecord) int {
-	return strings.Count(wordwrap.String(strings.Join(m.detailHeader(record), "\n"), max(20, m.detail.Width())), "\n") + 1
-}
-
-func (m tuiModel) detailHeader(record APODRecord) []string {
-	parts := []string{
-		primaryText.Bold(true).Render(record.Title),
-		secondaryText.Render("Date: ") + accentText.Render(record.Date),
-		secondaryText.Render("Type: ") + accentText.Render(strings.ToUpper(record.MediaType)),
-	}
-	if record.Favorite {
-		parts = append(parts, favoriteText.Render("★ Favorite"))
-	}
-	if record.PreviewError != "" {
-		parts = append(parts, statusError.Render("Preview error: "+record.PreviewError))
-	}
-	return parts
 }
 
 func (m *tuiModel) requestNativeImage() tea.Cmd {

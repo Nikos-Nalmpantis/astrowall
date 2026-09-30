@@ -121,7 +121,8 @@ Current behavior:
 - `b`: switch the primary pane between the latest 30 Recent items and the full local Archive (loaded on demand); searches and selection stay independent
 - compact terminals: the active list beside the detail view; narrow terminals stack the active list above it
 - very small terminals: a focused list view; `Tab` still switches between Recent and Favorites
-- right pane: the selected item's date, type, cache status, and description
+- detail pane: a bounded title, compact date/type/favorite metadata, preview/full-image cache indicators, and copyright attribution when space allows
+- cache indicators reflect saved library paths; full attribution and preview-error details are available in description view
 - separate sync progress and action-feedback lines beneath the panes
 - helpful messages for an empty library, empty favorites, no search matches, and unavailable previews
 - `j` / `k`: move through the list

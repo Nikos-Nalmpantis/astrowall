@@ -35,7 +35,8 @@
 - Separate background-sync progress and action-feedback lines.
 - Responsive wide two-list layout, compact active-list layout, narrow stacked layout, and very-small-terminal list view.
 - Empty-library, empty-favorites, no-match, and unavailable-preview guidance.
-- Selected title/date/media type, favorite badge, and preview-error details.
+- Bounded selected title, compact date/media-type/favorite metadata, and preview/full-image saved-path indicators.
+- Copyright attribution in the image header where space allows, with full credit and preview-error details in description view.
 - Image/description toggle (`d`); paged and half-page description scrolling.
 - Set the selected image as wallpaper (Enter) and toggle its favorite state (`f`).
 - Open the NASA APOD page (`o`) or original media (`u`) in a browser, including videos.

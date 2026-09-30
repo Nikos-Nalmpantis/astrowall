@@ -565,7 +565,7 @@ func TestTUIModelNativeImagePositionAccountsForFavoriteMetadata(t *testing.T) {
 	m.recentRecords[0].Favorite = true
 	m.syncListItems()
 	_, favoriteY := m.nativeImagePosition()
-	if x <= 0 || y <= 0 || favoriteY != y+1 {
+	if x <= 0 || y <= 0 || favoriteY != y {
 		t.Fatalf("normal position = %d,%d; favorite y = %d", x, y, favoriteY)
 	}
 }
@@ -1712,8 +1712,10 @@ func TestAPODListItemShowsPreviewError(t *testing.T) {
 		t.Fatalf("Description() = %q", got)
 	}
 	m := newTUIModel([]APODRecord{item.record}, nil, "KEY")
-	if got := strings.Join(m.detailHeader(item.record), "\n"); !strings.Contains(got, "Preview error: download timed out") {
-		t.Fatalf("detail header = %q", got)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(tuiModel)
+	if got := ansi.Strip(m.detail.View()); !strings.Contains(got, "Preview error: download timed out") {
+		t.Fatalf("detail description = %q", got)
 	}
 }
 
