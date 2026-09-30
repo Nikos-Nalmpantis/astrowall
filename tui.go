@@ -201,8 +201,6 @@ const (
 	horizontalInterPaneGap = 1
 )
 
-var selectedAccent = lipgloss.Color("#EE6FF8")
-
 func newListModel(title string, records []APODRecord) list.Model {
 	items := make([]list.Item, 0, len(records))
 	for _, record := range records {
@@ -211,8 +209,13 @@ func newListModel(title string, records []APODRecord) list.Model {
 	delegate := list.NewDefaultDelegate()
 	delegate.SetSpacing(0)
 	delegate.ShowDescription = true
-	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(selectedAccent)
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(selectedAccent)
+	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.Foreground(colorStarlight)
+	delegate.Styles.NormalDesc = delegate.Styles.NormalDesc.Foreground(colorMuted)
+	delegate.Styles.DimmedTitle = delegate.Styles.DimmedTitle.Foreground(colorMuted)
+	delegate.Styles.DimmedDesc = delegate.Styles.DimmedDesc.Foreground(colorBorder)
+	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(colorStarlight).BorderForeground(selectedAccent).Bold(true)
+	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(colorViolet).BorderForeground(selectedAccent)
+	delegate.Styles.FilterMatch = delegate.Styles.FilterMatch.Foreground(colorCyan)
 
 	listModel := list.New(items, delegate, 0, 0)
 	listModel.Title = title
@@ -221,6 +224,12 @@ func newListModel(title string, records []APODRecord) list.Model {
 	listModel.SetShowPagination(true)
 	listModel.SetShowFilter(true)
 	listModel.SetFilteringEnabled(true)
+	listModel.Styles.Title = listModel.Styles.Title.Background(colorPanel).Foreground(colorCyan).Bold(true)
+	listModel.Styles.Filter.Focused.Prompt = listModel.Styles.Filter.Focused.Prompt.Foreground(colorCyan)
+	listModel.Styles.Filter.Blurred.Prompt = listModel.Styles.Filter.Blurred.Prompt.Foreground(colorCyan)
+	listModel.Styles.Filter.Cursor.Color = colorViolet
+	listModel.Styles.ActivePaginationDot = listModel.Styles.ActivePaginationDot.Foreground(colorViolet)
+	listModel.Styles.InactivePaginationDot = listModel.Styles.InactivePaginationDot.Foreground(colorBorder)
 	listModel.KeyMap.AcceptWhileFiltering.SetKeys("enter")
 	listModel.DisableQuitKeybindings()
 	return listModel
@@ -232,7 +241,7 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 	detail := viewport.New()
 	detail.SetContent("No APODs loaded.")
 	spin := spinner.New()
-	spin.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	spin.Style = accentText
 	keyInput := textinput.New()
 	keyInput.Prompt = "NASA API key: "
 	keyInput.Placeholder = "Paste your key"
@@ -253,10 +262,10 @@ func newTUIModel(recentRecords, favoriteRecords []APODRecord, apiKey string) tui
 		activePane:      recentPane,
 		spinner:         spin,
 		nativeOutput:    newNativeImageOutput(io.Discard),
-		listStyle:       lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(0, 1),
-		detailStyle:     lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(0, 1),
-		statusStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("241")),
-		helpStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("244")),
+		listStyle:       lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).BorderForeground(colorBorder).Padding(0, 1),
+		detailStyle:     lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).BorderForeground(colorCyan).Padding(0, 1),
+		statusStyle:     lipgloss.NewStyle(),
+		helpStyle:       secondaryText,
 	}
 	m.updatePaneTitles()
 	m.refreshDetail(false)
@@ -739,14 +748,14 @@ func (m tuiModel) View() tea.View {
 	}
 	lineWidth := max(1, m.width-horizontalOuterInset*2)
 	status = ansi.Truncate(status, lineWidth, "")
-	helpLine := ansi.Truncate(fmt.Sprintf("Active pane: %s • / search • Tab/Shift+Tab panes • j/k move • d %s • a API key • f favorite • o page • u media • enter wallpaper • ? help • q quit", m.activePaneLabel(), m.detailToggleLabel()), lineWidth, "")
+	helpLine := shortcutHints(lineWidth, m.activePaneLabel(), m.detailToggleLabel())
 	textInset := strings.Repeat(" ", horizontalOuterInset)
 
 	body := lipgloss.JoinVertical(
 		lipgloss.Left,
 		layoutSpacer(verticalOuterInset),
 		panes,
-		textInset+m.statusStyle.Render(status),
+		textInset+m.statusStyle.Render(styleStatus(status)),
 		textInset+m.helpStyle.Render(helpLine),
 		layoutSpacer(verticalOuterInset),
 	)
@@ -810,7 +819,7 @@ func (m *tuiModel) refreshDetail(resetScroll bool) {
 
 	parts := m.detailHeader(record)
 	if m.descriptionVisible() {
-		parts = append(parts, "", "Description", "", strings.TrimSpace(record.Description))
+		parts = append(parts, "", accentText.Bold(true).Render("Description"), "", strings.TrimSpace(record.Description))
 	} else if record.PreviewPath != "" && m.nativeImageMatches(record.PreviewPath) {
 		parts = append(parts, m.nativeImage.placeholders)
 	} else if record.PreviewPath != "" {
@@ -919,9 +928,9 @@ func (m *tuiModel) closeAPIKeyInput() {
 
 func (m tuiModel) renderAPIKeyInput() string {
 	return strings.Join([]string{
-		"NASA API Key",
+		accentText.Bold(true).Render("NASA API Key"),
 		"",
-		fmt.Sprintf("Current source: %s", m.apiKeySource),
+		secondaryText.Render("Current source: ") + accentText.Render(string(m.apiKeySource)),
 		"",
 		m.apiKeyInput.View(),
 		"",
@@ -990,15 +999,15 @@ func (m tuiModel) detailHeaderHeight(record APODRecord) int {
 
 func (m tuiModel) detailHeader(record APODRecord) []string {
 	parts := []string{
-		record.Title,
-		fmt.Sprintf("Date: %s", record.Date),
-		fmt.Sprintf("Type: %s", record.MediaType),
+		primaryText.Bold(true).Render(record.Title),
+		secondaryText.Render("Date: ") + accentText.Render(record.Date),
+		secondaryText.Render("Type: ") + accentText.Render(strings.ToUpper(record.MediaType)),
 	}
 	if record.Favorite {
-		parts = append(parts, "Favorite: yes")
+		parts = append(parts, favoriteText.Render("★ Favorite"))
 	}
 	if record.PreviewError != "" {
-		parts = append(parts, "Preview error: "+record.PreviewError)
+		parts = append(parts, statusError.Render("Preview error: "+record.PreviewError))
 	}
 	return parts
 }
@@ -1487,16 +1496,16 @@ func spinnerTickCmd(spin spinner.Model) tea.Cmd {
 
 func (m tuiModel) renderHelpView() string {
 	return strings.Join([]string{
-		"Keybindings",
+		accentText.Bold(true).Render("Keybindings"),
 		"",
-		"Navigation",
+		favoriteText.Render("Navigation"),
 		"  j / k              Move within the active pane",
 		"  Tab                Switch to the next pane",
 		"  Shift+Tab          Switch to the previous pane",
 		"  /                  Search the active pane",
 		"  Esc                Clear an applied search",
 		"",
-		"Actions",
+		favoriteText.Render("Actions"),
 		"  Enter              Download/apply wallpaper for selected APOD",
 		"  d                  Toggle image and description views",
 		"  a                  Add or replace the saved NASA API key",
@@ -1509,7 +1518,7 @@ func (m tuiModel) renderHelpView() string {
 		"  Esc                Close the help view",
 		"  q / Ctrl+C         Quit",
 		"",
-		"Notes",
+		favoriteText.Render("Notes"),
 		"  - The active pane title includes • active",
 		"  - Favorites persist in the local SQLite library",
 		"  - --cycle-favorites rotates favorites outside the TUI",
